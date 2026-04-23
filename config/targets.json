@@ -1,0 +1,16 @@
+{
+  "targets": [
+    {
+      "id": "fuji-site",
+      "name": "Сайт fuji.ru",
+      "url": "https://fuji.ru/",
+      "timeoutMs": 20000
+    },
+    {
+      "id": "fuji-www-redirect",
+      "name": "Публичный веб (редиректы)",
+      "url": "https://www.fuji.ru/",
+      "timeoutMs": 20000
+    }
+  ]
+}
