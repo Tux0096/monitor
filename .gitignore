@@ -23,6 +23,8 @@
 # misc
 .DS_Store
 *.pem
+deploy_bundle.tar.gz
+scripts/deploy.env
 
 # debug
 npm-debug.log*
