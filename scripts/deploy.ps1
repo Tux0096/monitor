@@ -40,6 +40,12 @@ $ScpArgs = @("-o", "StrictHostKeyChecking=accept-new", "-i", $KeyPath, $Bundle, 
 Write-Host "==> scp upload"
 & scp @ScpArgs
 
+$EnvProd = Join-Path $PSScriptRoot "server.env.production"
+if (Test-Path $EnvProd) {
+  Write-Host "==> scp .env.local"
+  & scp -o StrictHostKeyChecking=accept-new -i $KeyPath $EnvProd "${Remote}:${REMOTE_DIR}/.env.local"
+}
+
 $RemoteCmd = @"
 set -e
 cd ${REMOTE_DIR}

@@ -25,6 +25,7 @@
 *.pem
 deploy_bundle.tar.gz
 scripts/deploy.env
+scripts/server.env.production
 
 # debug
 npm-debug.log*
