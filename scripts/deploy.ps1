@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 if (-not (Test-Path $EnvFile)) {
-  Write-Error "Создайте $EnvFile из scripts/deploy.env.example"
+  Write-Error "Create $EnvFile from scripts/deploy.env.example"
 }
 
 Get-Content $EnvFile | ForEach-Object {
@@ -23,7 +23,7 @@ $KeyPath = if ([System.IO.Path]::IsPathRooted($SSH_KEY_PATH)) {
 }
 
 if (-not (Test-Path $KeyPath)) {
-  Write-Error "SSH ключ не найден: $KeyPath"
+  Write-Error "SSH key not found: $KeyPath"
 }
 
 Set-Location $ProjectRoot
@@ -57,4 +57,4 @@ Write-Host "==> ssh restart"
 & ssh -o StrictHostKeyChecking=accept-new -i $KeyPath $Remote $RemoteCmd
 
 Write-Host ""
-Write-Host "Готово: http://${SERVER_HOST}"
+Write-Host "Done: http://${SERVER_HOST}"
