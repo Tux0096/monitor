@@ -164,9 +164,13 @@ export function DashboardClient({ initial }: { initial: MonitorSnapshot }) {
         <p className="mt-1 text-sm text-zinc-500">
           Проект:{" "}
           <code className="text-zinc-400">{fb?.projectId ?? "—"}</code>
-          . Нужны роли в Google Cloud / Firebase для этого проекта. Метрики
-          Crashlytics / Performance как в консоли здесь не дублируются — для них
-          нужны отдельные API или экспорт в BigQuery.
+          {fb?.authSource ? (
+            <span className="ml-2 text-zinc-600">
+              (источник: {fb.authSource})
+            </span>
+          ) : null}
+          . Для API нужен ключ сервисного аккаунта Firebase на сервере или вход
+          через Google.
         </p>
 
         {fbErr ? (

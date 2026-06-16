@@ -1,4 +1,6 @@
 import { google } from "googleapis";
+import type { OAuth2Client } from "google-auth-library";
+import type { ResolvedGoogleAuth } from "@/lib/google-auth";
 
 export type FirebaseAppRow = {
   platform: string;
@@ -9,20 +11,22 @@ export type FirebaseAppRow = {
 
 export type FirebaseReport = {
   projectId: string;
+  authSource: ResolvedGoogleAuth["source"] | "none";
   project: Record<string, unknown> | null;
   apps: FirebaseAppRow[];
   apiErrors: string[];
   fetchedAt: string;
 };
 
+type GoogleAuthClient = ResolvedGoogleAuth["auth"];
+
 export async function buildFirebaseReport(
-  accessToken: string,
+  auth: GoogleAuthClient,
   projectId: string,
+  authSource: ResolvedGoogleAuth["source"],
 ): Promise<FirebaseReport> {
   const apiErrors: string[] = [];
-  const oauth2 = new google.auth.OAuth2();
-  oauth2.setCredentials({ access_token: accessToken });
-  const fb = google.firebase({ version: "v1beta1", auth: oauth2 });
+  const fb = google.firebase({ version: "v1beta1", auth: auth as OAuth2Client });
   const parent = `projects/${projectId}`;
 
   let project: Record<string, unknown> | null = null;
@@ -87,6 +91,7 @@ export async function buildFirebaseReport(
 
   return {
     projectId,
+    authSource,
     project,
     apps,
     apiErrors,

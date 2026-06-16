@@ -46,21 +46,30 @@ if (Test-Path $EnvProd) {
   & scp -o StrictHostKeyChecking=accept-new -i $KeyPath $EnvProd "${Remote}:${REMOTE_DIR}/.env.local"
 }
 
+$FirebaseKey = Join-Path $PSScriptRoot "secrets/firebase-sa.json"
+if (Test-Path $FirebaseKey) {
+  Write-Host "==> scp firebase service account (only /opt/monitor/secrets)"
+  & ssh -o StrictHostKeyChecking=accept-new -i $KeyPath $Remote "mkdir -p ${REMOTE_DIR}/secrets && chmod 700 ${REMOTE_DIR}/secrets"
+  & scp -o StrictHostKeyChecking=accept-new -i $KeyPath $FirebaseKey "${Remote}:${REMOTE_DIR}/secrets/firebase-sa.json"
+  & ssh -o StrictHostKeyChecking=accept-new -i $KeyPath $Remote "chmod 600 ${REMOTE_DIR}/secrets/firebase-sa.json"
+}
+
+$MonitorPort = if ($MONITOR_PORT) { $MONITOR_PORT } else { "3000" }
+
 $RemoteCmd = @"
 set -e
 cd ${REMOTE_DIR}
 tar --overwrite -xzf deploy_bundle.tar.gz
 rm -f deploy_bundle.tar.gz
 pm2 delete ${PM2_APP_NAME} >/dev/null 2>&1 || true
-HOSTNAME=0.0.0.0 PORT=3000 pm2 start .next/standalone/server.js --name ${PM2_APP_NAME} --interpreter node --cwd ${REMOTE_DIR} --update-env
+HOSTNAME=0.0.0.0 PORT=${MonitorPort} pm2 start .next/standalone/server.js --name ${PM2_APP_NAME} --interpreter node --cwd ${REMOTE_DIR} --update-env
 pm2 save
 pm2 status
-curl -s -o /dev/null -w 'http_local=%{http_code}\n' http://127.0.0.1:3000
-curl -s -o /dev/null -w 'nginx_80=%{http_code}\n' http://127.0.0.1
+curl -s -o /dev/null -w 'monitor_port_${MonitorPort}=%{http_code}\n' http://127.0.0.1:${MonitorPort}
 "@
 
 Write-Host "==> ssh restart"
 & ssh -o StrictHostKeyChecking=accept-new -i $KeyPath $Remote $RemoteCmd
 
-Write-Host ""
-Write-Host "Done: http://${SERVER_HOST}"
+Write-Host "Done: http://${SERVER_HOST}:${MonitorPort}"
+Write-Host "Port 80 left to fuji-crm/courier (unchanged)"

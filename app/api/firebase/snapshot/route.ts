@@ -1,5 +1,6 @@
 import { auth } from "@/auth";
 import { buildFirebaseReport } from "@/lib/firebase-report";
+import { resolveGoogleApiAuth } from "@/lib/google-auth";
 
 export async function GET() {
   const session = await auth();
@@ -7,12 +8,13 @@ export async function GET() {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  if (!session.accessToken) {
+  const resolved = await resolveGoogleApiAuth(session.accessToken);
+  if (!resolved.auth) {
     return Response.json(
       {
-        error: "Нужен вход через Google",
+        error: "Нет доступа к Firebase API",
         hint:
-          "Данные Firebase доступны только после авторизации Google с нужными правами в проекте.",
+          "Положите JSON-ключ сервисного аккаунта Firebase в scripts/secrets/firebase-sa.json и выполните npm run deploy, либо войдите через Google.",
       },
       { status: 403 },
     );
@@ -22,7 +24,11 @@ export async function GET() {
     process.env.FIREBASE_PROJECT_ID?.trim() || "fuji-notifications";
 
   try {
-    const report = await buildFirebaseReport(session.accessToken, projectId);
+    const report = await buildFirebaseReport(
+      resolved.auth,
+      projectId,
+      resolved.source,
+    );
     return Response.json(report);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

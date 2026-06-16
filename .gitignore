@@ -26,6 +26,7 @@
 deploy_bundle.tar.gz
 scripts/deploy.env
 scripts/server.env.production
+scripts/secrets/
 
 # debug
 npm-debug.log*
