@@ -12,7 +12,7 @@ import type {
 import type { MonitorSnapshot } from "@/lib/types";
 import { signOut, useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type ApiErrorPayload = {
   error?: string;
@@ -20,6 +20,7 @@ type ApiErrorPayload = {
 };
 
 const pageSize = 4;
+const METRIC_SLOW_MS = 1100;
 
 const MONTHS_RU = [
   "янв",
@@ -62,6 +63,55 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const [appealsDateFrom, setAppealsDateFrom] = useState(() => defaultAppealsDateFrom());
   const [appealsDateTo, setAppealsDateTo] = useState(() => defaultAppealsDateTo());
   const [appealsLoading, setAppealsLoading] = useState(false);
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const prevSlowKeysRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    setNotifyEnabled(Notification.permission === "granted");
+  }, []);
+
+  useEffect(() => {
+    if (!report?.pages || !notifyEnabled || typeof window === "undefined" || !("Notification" in window)) {
+      return;
+    }
+    if (Notification.permission !== "granted") return;
+
+    const slowNow = report.pages.filter((page) => isSlowMetric(page.currentMs));
+    const newlySlow = slowNow.filter((page) => !prevSlowKeysRef.current.has(pageKey(page)));
+    if (newlySlow.length === 0) {
+      prevSlowKeysRef.current = new Set(slowNow.map(pageKey));
+      return;
+    }
+
+    if (newlySlow.length === 1) {
+      const item = newlySlow[0]!;
+      new Notification("Показатель выше нормы", {
+        body: `${item.metricName}: ${formatTime(item.currentMs)} · норма 1.1 с\n${item.page}`,
+        tag: `slow-${pageKey(item)}`,
+      });
+    } else {
+      new Notification("Показатели выше нормы", {
+        body: `${newlySlow.length} показателей превысили 1.1 с\n${newlySlow
+          .slice(0, 4)
+          .map((item) => `${item.metricName}: ${formatTime(item.currentMs)}`)
+          .join("\n")}${newlySlow.length > 4 ? "\n…" : ""}`,
+        tag: "slow-metrics-batch",
+      });
+    }
+
+    prevSlowKeysRef.current = new Set(slowNow.map(pageKey));
+  }, [report, notifyEnabled]);
+
+  async function enableBrowserNotifications() {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    const permission = await Notification.requestPermission();
+    const granted = permission === "granted";
+    setNotifyEnabled(granted);
+    if (granted && report?.pages) {
+      prevSlowKeysRef.current = new Set();
+    }
+  }
 
   useEffect(() => {
     if (!session?.user) return;
@@ -192,14 +242,17 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
             summary={`${sitePages.length} показателей${updatedAt ? ` · обновлено ${new Date(updatedAt).toLocaleTimeString("ru-RU")}` : ""}`}
             badge={
               sitePages.length > 0 ? (
-                <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
-                  {countSlowMetrics(sitePages)} медленных
-                </span>
+                <SlowMetricsBadge count={countSlowMetrics(sitePages)} />
               ) : null
             }
             expanded={siteExpanded}
             onToggle={() => setSiteExpanded((value) => !value)}
           >
+            <MonitoringAlertsBar
+              slowCount={countSlowMetrics(sitePages)}
+              notifyEnabled={notifyEnabled}
+              onEnableNotifications={() => void enableBrowserNotifications()}
+            />
             <div className="mb-4">
               <DateRangeFilter
                 dateFrom={monitorDateFrom}
@@ -232,14 +285,17 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
             summary={`${mobilePages.length} показателей${updatedAt ? ` · обновлено ${new Date(updatedAt).toLocaleTimeString("ru-RU")}` : ""}`}
             badge={
               mobilePages.length > 0 ? (
-                <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
-                  {countSlowMetrics(mobilePages)} медленных
-                </span>
+                <SlowMetricsBadge count={countSlowMetrics(mobilePages)} />
               ) : null
             }
             expanded={mobileExpanded}
             onToggle={() => setMobileExpanded((value) => !value)}
           >
+            <MonitoringAlertsBar
+              slowCount={countSlowMetrics(mobilePages)}
+              notifyEnabled={notifyEnabled}
+              onEnableNotifications={() => void enableBrowserNotifications()}
+            />
             <div className="mb-4">
               <DateRangeFilter
                 dateFrom={monitorDateFrom}
@@ -406,6 +462,59 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   );
 }
 
+function SlowMetricsBadge({ count }: { count: number }) {
+  if (count === 0) {
+    return (
+      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">
+        в норме
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-200">
+      {count} выше 1.1 с
+    </span>
+  );
+}
+
+function MonitoringAlertsBar({
+  slowCount,
+  notifyEnabled,
+  onEnableNotifications,
+}: {
+  slowCount: number;
+  notifyEnabled: boolean;
+  onEnableNotifications: () => void;
+}) {
+  const canNotify = typeof window !== "undefined" && "Notification" in window;
+
+  return (
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2">
+      <p className="text-xs text-zinc-500">
+        Норма: <span className="text-zinc-300">≤ 1.1 с</span>
+        {slowCount > 0 ? (
+          <span className="ml-2 text-amber-300">
+            · {slowCount} показател{slowCount === 1 ? "ь" : slowCount < 5 ? "я" : "ей"} выше нормы
+          </span>
+        ) : (
+          <span className="ml-2 text-emerald-300">· все в норме</span>
+        )}
+      </p>
+      {canNotify && !notifyEnabled ? (
+        <button
+          type="button"
+          onClick={onEnableNotifications}
+          className="rounded-lg border border-amber-500/40 px-3 py-1.5 text-xs text-amber-200 hover:border-amber-400/60"
+        >
+          Включить уведомления браузера
+        </button>
+      ) : canNotify && notifyEnabled ? (
+        <span className="text-xs text-emerald-300">Уведомления включены</span>
+      ) : null}
+    </div>
+  );
+}
+
 function ExpandableCard({
   title,
   summary,
@@ -513,15 +622,34 @@ function MetricDetailPanel({
   item: HistoryPageMetric;
   updatedAt: string | null;
 }) {
+  const slow = isSlowMetric(item.currentMs);
   return (
-    <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950 p-5">
-      <p className="text-sm text-zinc-500">
-        {item.metricName} · {item.page}
-      </p>
-      <h3 className="mt-2 text-2xl font-semibold text-white">{formatTime(item.currentMs)}</h3>
+    <div
+      className={`mt-6 rounded-xl border p-5 ${
+        slow ? "border-amber-500/40 bg-amber-500/5" : "border-zinc-800 bg-zinc-950"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-zinc-500">
+          {item.metricName} · {item.page}
+        </p>
+        {slow ? (
+          <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-200">
+            выше нормы
+          </span>
+        ) : null}
+      </div>
+      <h3 className={`mt-2 text-2xl font-semibold ${slow ? "text-amber-300" : "text-white"}`}>
+        {formatTime(item.currentMs)}
+      </h3>
       <PerformanceChart points={item.chart} />
       <div className="mt-4 flex flex-wrap gap-8 text-sm">
-        <MetricLegend label="среднее за период" value={formatTime(item.currentMs)} color="bg-blue-400" />
+        <MetricLegend
+          label="среднее за период"
+          value={formatTime(item.currentMs)}
+          color={slow ? "bg-amber-400" : "bg-blue-400"}
+          valueClass={slow ? "text-amber-300" : undefined}
+        />
         <MetricLegend label="сэмплы" value={String(item.samples)} color="bg-emerald-400" />
         {updatedAt ? (
           <MetricLegend
@@ -621,7 +749,11 @@ function sumMetricValues(row: AppealsAnalyticsReport["qualityRows"][number] | un
 }
 
 function countSlowMetrics(items: HistoryPageMetric[]) {
-  return items.filter((item) => (item.currentMs ?? 0) > 1500).length;
+  return items.filter((item) => isSlowMetric(item.currentMs)).length;
+}
+
+function isSlowMetric(ms: number | null | undefined) {
+  return (ms ?? 0) > METRIC_SLOW_MS;
 }
 
 function DataTileSkeleton() {
@@ -647,24 +779,31 @@ function DataTile({
   selected: boolean;
   onClick: () => void;
 }) {
-  const bad = (item.currentMs ?? 0) > 1500;
+  const slow = isSlowMetric(item.currentMs);
   return (
     <button
       type="button"
       onClick={onClick}
       className={`h-24 w-full rounded-lg border p-2 text-left transition ${
         selected
-          ? "border-emerald-400 bg-emerald-400/20"
-          : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
+          ? slow
+            ? "border-amber-400 bg-amber-400/15"
+            : "border-emerald-400 bg-emerald-400/20"
+          : slow
+            ? "border-amber-500/50 bg-amber-500/10 hover:border-amber-400/70"
+            : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
       }`}
       title={`${item.metricName}: ${item.page}`}
     >
-      <div className="truncate text-[10px] text-zinc-500">{item.metricName}</div>
+      <div className="flex items-center justify-between gap-1">
+        <div className="truncate text-[10px] text-zinc-500">{item.metricName}</div>
+        {slow ? <span className="text-[9px] font-semibold uppercase text-amber-300">!</span> : null}
+      </div>
       <div className="mt-1 line-clamp-2 text-xs text-zinc-200">{item.page}</div>
       <div className="mt-2 flex items-end justify-between">
         <span
           className={
-            bad ? "text-sm font-semibold text-red-300" : "text-sm font-semibold text-emerald-300"
+            slow ? "text-sm font-semibold text-amber-300" : "text-sm font-semibold text-emerald-300"
           }
         >
           {formatTime(item.currentMs)}
@@ -679,10 +818,12 @@ function MetricLegend({
   label,
   value,
   color,
+  valueClass,
 }: {
   label: string;
   value: string;
   color: string;
+  valueClass?: string;
 }) {
   return (
     <div>
@@ -690,7 +831,7 @@ function MetricLegend({
         <span className={`h-2 w-2 rounded-full ${color}`} />
         {label}
       </div>
-      <p className="mt-1 text-lg font-semibold text-white">{value}</p>
+      <p className={`mt-1 text-lg font-semibold ${valueClass ?? "text-white"}`}>{value}</p>
     </div>
   );
 }
@@ -711,9 +852,13 @@ function WeeklySummaryTable({ rows }: { rows: HistoryPageMetric["weekly"] }) {
           {rows.map((row) => (
             <tr key={row.label}>
               <td className="px-4 py-3 text-zinc-300">{row.label}</td>
-              <td className="px-4 py-3 text-zinc-400">{formatTime(row.avgMs)}</td>
+              <td className={`px-4 py-3 ${isSlowMetric(row.avgMs) ? "font-medium text-amber-300" : "text-zinc-400"}`}>
+                {formatTime(row.avgMs)}
+              </td>
               <td className="px-4 py-3 text-zinc-400">{formatTime(row.minMs)}</td>
-              <td className="px-4 py-3 text-zinc-400">{formatTime(row.maxMs)}</td>
+              <td className={`px-4 py-3 ${isSlowMetric(row.maxMs) ? "font-medium text-amber-300" : "text-zinc-400"}`}>
+                {formatTime(row.maxMs)}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -783,10 +928,16 @@ function PerformanceChart({ points }: { points: HistoryChartPoint[] }) {
           const showDay = idx % labelStep === 0 || idx === points.length - 1;
           const isMonthStart =
             idx === 0 || new Date(points[idx - 1]?.date ?? point.date).getUTCMonth() !== month;
+          const slow = isSlowMetric(point.valueMs);
           return (
             <g key={point.dayIndex}>
               {point.valueMs == null ? null : (
-                <circle cx={x(idx)} cy={y(point.valueMs)} r="3.5" fill="#6d7dfc" />
+                <circle
+                  cx={x(idx)}
+                  cy={y(point.valueMs)}
+                  r="3.5"
+                  fill={slow ? "#fbbf24" : "#6d7dfc"}
+                />
               )}
               {showDay ? (
                 <text
