@@ -1,0 +1,7 @@
+# Copy to scripts/docker-compose.production (gitignored)
+POSTGRES_USER=monitor
+POSTGRES_PASSWORD=CHANGE_ME_STRONG
+JWT_SECRET=CHANGE_ME_JWT_SECRET_MIN_32_CHARS_LONG_OK
+JWT_EXPIRES_IN=7d
+BOOTSTRAP_EMAIL=admin@it.franchise-fuji.ru
+BOOTSTRAP_PASSWORD=FujiDash-2026-Online

@@ -1,5 +1,7 @@
 import { google } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
+import { getGoogleOAuthCredentials } from "@/lib/google-oauth-store";
+import { access } from "node:fs/promises";
 
 const GOOGLE_API_SCOPES = [
   "https://www.googleapis.com/auth/firebase",
@@ -31,14 +33,24 @@ export async function resolveGoogleApiAuth(
 ): Promise<ResolvedGoogleAuth | { auth: null; source: "none" }> {
   const credentials = parseServiceAccountJson();
   const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_FILE?.trim();
+  const { clientId, clientSecret, refreshToken } =
+    await getGoogleOAuthCredentials();
 
-  if (credentials || keyFile) {
+  const existingKeyFile = keyFile ? await fileExists(keyFile) : false;
+
+  if (credentials || existingKeyFile) {
     const googleAuth = new google.auth.GoogleAuth({
-      ...(credentials ? { credentials } : { keyFile }),
+      ...(credentials ? { credentials } : { keyFile: keyFile! }),
       scopes: GOOGLE_API_SCOPES,
     });
     const client = await googleAuth.getClient();
     return { auth: client, source: "service_account" };
+  }
+
+  if (clientId && clientSecret && refreshToken) {
+    const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+    oauth2.setCredentials({ refresh_token: refreshToken });
+    return { auth: oauth2, source: "user_oauth" };
   }
 
   if (userAccessToken) {
@@ -48,4 +60,13 @@ export async function resolveGoogleApiAuth(
   }
 
   return { auth: null, source: "none" };
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }

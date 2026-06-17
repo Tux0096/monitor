@@ -14,7 +14,7 @@ export async function GET() {
       {
         error: "Нет доступа к Firebase API",
         hint:
-          "Положите JSON-ключ сервисного аккаунта Firebase в scripts/secrets/firebase-sa.json и выполните npm run deploy, либо войдите через Google.",
+          "Подключите Google Firebase OAuth в дашборде. Refresh token хранится только на сервере.",
       },
       { status: 403 },
     );

@@ -1,0 +1,57 @@
+services:
+  monitor-postgres:
+    image: postgres:16-alpine
+    container_name: monitor-postgres
+    restart: unless-stopped
+    networks:
+      - monitor-net
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-monitor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: monitor_auth
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - monitor_pg_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-databases.sql:/docker-entrypoint-initdb.d/02-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-monitor} -d monitor_auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: monitor-auth-service
+    restart: unless-stopped
+    networks:
+      - monitor-net
+    depends_on:
+      monitor-postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3101"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-monitor}:${POSTGRES_PASSWORD}@monitor-postgres:5432/monitor_auth
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      BOOTSTRAP_EMAIL: ${BOOTSTRAP_EMAIL:-admin@it.franchise-fuji.ru}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:-}
+    ports:
+      - "127.0.0.1:3101:3101"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3101/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  monitor-net:
+    name: monitor-net
+    driver: bridge
+
+volumes:
+  monitor_pg_data:
+    name: monitor_pg_data

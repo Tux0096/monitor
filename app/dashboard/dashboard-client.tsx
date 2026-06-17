@@ -1,152 +1,156 @@
 "use client";
 
-import type { CheckResult, MonitorSnapshot } from "@/lib/types";
-import type { FirebaseReport } from "@/lib/firebase-report";
+import type {
+  HistoryChartPoint,
+  HistoryPageMetric,
+  PerformanceHistoryReport,
+} from "@/lib/firebase-performance-history";
+import type {
+  AppealsAnalyticsReport,
+  AppealAnalyticsRow,
+} from "@/lib/appeals";
+import type { MonitorSnapshot } from "@/lib/types";
 import { signOut, useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-function statusLabel(s: CheckResult["status"]): string {
-  switch (s) {
-    case "ok":
-      return "Работает";
-    case "degraded":
-      return "Ограничено";
-    case "down":
-      return "Недоступно";
-    case "checking":
-      return "Проверка…";
-    default:
-      return s;
-  }
-}
+type ApiErrorPayload = {
+  error?: string;
+  hint?: string;
+};
 
-function statusStyles(s: CheckResult["status"]): string {
-  switch (s) {
-    case "ok":
-      return "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30";
-    case "degraded":
-      return "bg-amber-500/15 text-amber-200 ring-amber-500/30";
-    case "down":
-      return "bg-red-500/15 text-red-300 ring-red-500/35";
-    case "checking":
-      return "bg-zinc-500/15 text-zinc-300 ring-zinc-500/25";
-    default:
-      return "bg-zinc-500/15 text-zinc-300";
-  }
-}
+const pageSize = 4;
 
-function pickProjectFields(project: Record<string, unknown> | null) {
-  if (!project) return [];
-  const keys = [
-    "displayName",
-    "projectId",
-    "projectNumber",
-    "state",
-    "resources",
-  ] as const;
-  return keys
-    .filter((k) => project[k] !== undefined && project[k] !== null)
-    .map((k) => ({
-      key: k,
-      value:
-        typeof project[k] === "object"
-          ? JSON.stringify(project[k])
-          : String(project[k]),
-    }));
-}
+type AppealsAnalyticsResponse = {
+  rows: AppealAnalyticsRow[];
+  report: AppealsAnalyticsReport;
+};
 
-export function DashboardClient({ initial }: { initial: MonitorSnapshot }) {
+type AppealsDetailKey = "quality" | "categories" | "users" | "weekly";
+
+export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const router = useRouter();
   const { data: session } = useSession();
-  const [snap, setSnap] = useState<MonitorSnapshot>(initial);
-  const [fb, setFb] = useState<FirebaseReport | null>(null);
-  const [fbErr, setFbErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    let es: EventSource | null = null;
-    (async () => {
-      try {
-        const r = await fetch("/api/health");
-        if (r.ok) {
-          setSnap((await r.json()) as MonitorSnapshot);
-        }
-      } catch {
-        /* keep initial */
-      }
-      es = new EventSource("/api/health/stream");
-      es.onmessage = (ev) => {
-        try {
-          setSnap(JSON.parse(ev.data) as MonitorSnapshot);
-        } catch {
-          /* ignore */
-        }
-      };
-      es.onerror = () => {
-        es?.close();
-      };
-    })();
-    return () => es?.close();
-  }, []);
+  const [report, setReport] = useState<PerformanceHistoryReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [siteExpanded, setSiteExpanded] = useState(false);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+  const [appealsExpanded, setAppealsExpanded] = useState(false);
+  const [siteSelectedKey, setSiteSelectedKey] = useState<string | null>(null);
+  const [mobileSelectedKey, setMobileSelectedKey] = useState<string | null>(null);
+  const [sitePage, setSitePage] = useState(1);
+  const [mobilePage, setMobilePage] = useState(1);
+  const [appealRows, setAppealRows] = useState<AppealAnalyticsRow[]>([]);
+  const [appealReport, setAppealReport] = useState<AppealsAnalyticsReport | null>(null);
+  const [appealsDetailKey, setAppealsDetailKey] = useState<AppealsDetailKey | null>(null);
+  const [appealsDateFrom, setAppealsDateFrom] = useState(() => defaultAppealsDateFrom());
+  const [appealsDateTo, setAppealsDateTo] = useState(() => defaultAppealsDateTo());
+  const [appealsLoading, setAppealsLoading] = useState(false);
 
   useEffect(() => {
     if (!session?.user) return;
-    (async () => {
+    let cancelled = false;
+
+    async function load() {
       try {
-        const r = await fetch("/api/firebase/snapshot");
-        const data = (await r.json()) as FirebaseReport & {
-          error?: string;
-          hint?: string;
-        };
-        if (!r.ok) {
-          setFbErr(data.hint ?? data.error ?? `Ошибка ${r.status}`);
-          setFb(null);
+        const response = await fetch("/api/firebase/performance/history", {
+          cache: "no-store",
+        });
+        const data = await readJson<PerformanceHistoryReport & ApiErrorPayload>(response);
+
+        if (cancelled) return;
+
+        if (!response.ok) {
+          setReport(null);
           return;
         }
-        setFbErr(null);
-        setFb(data);
-      } catch (e) {
-        setFbErr(e instanceof Error ? e.message : "Ошибка загрузки Firebase");
-        setFb(null);
+
+        setReport(data.pages ? data : null);
+        setUpdatedAt(data.fetchedAt);
+      } catch {
+        if (!cancelled) setReport(null);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    })();
+    }
+
+    void load();
+    const interval = window.setInterval(() => void load(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [session?.user]);
+
+  useEffect(() => {
+    if (!session?.user) return;
+    let cancelled = false;
+    async function loadAppeals() {
+      setAppealsLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (appealsDateFrom) params.set("from", appealsDateFrom);
+        if (appealsDateTo) params.set("to", appealsDateTo);
+        const query = params.toString();
+        const response = await fetch(
+          `/api/appeals/analytics${query ? `?${query}` : ""}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) return;
+        const data = (await response.json()) as AppealsAnalyticsResponse;
+        if (!cancelled) {
+          setAppealRows(data.rows);
+          setAppealReport(data.report);
+        }
+      } finally {
+        if (!cancelled) setAppealsLoading(false);
+      }
+    }
+    void loadAppeals();
+    const interval = window.setInterval(() => void loadAppeals(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [session?.user, appealsDateFrom, appealsDateTo]);
 
   async function logout() {
     await signOut({ callbackUrl: "/login" });
     router.refresh();
   }
 
-  const ok = snap.results.filter((r) => r.status === "ok").length;
-  const total = snap.results.length;
+  const sitePages = (report?.pages ?? []).filter((page) => page.sourceType === "site");
+  const mobilePages = (report?.pages ?? []).filter((page) => page.sourceType === "mobile");
+  const selectedSite =
+    sitePages.find((page) => pageKey(page) === siteSelectedKey) ?? sitePages[0] ?? null;
+  const selectedMobile =
+    mobilePages.find((page) => pageKey(page) === mobileSelectedKey) ?? mobilePages[0] ?? null;
+
+  const appealsSummary = useMemo(
+    () => summarizeAppeals(appealRows, appealReport),
+    [appealRows, appealReport],
+  );
+
+  const appealsPeriodLabel = formatAppealsPeriodLabel(appealsDateFrom, appealsDateTo);
+
+  function toggleAppealsExpanded() {
+    setAppealsExpanded((current) => {
+      const next = !current;
+      if (next && !appealsDetailKey) setAppealsDetailKey("quality");
+      return next;
+    });
+  }
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-10">
-      <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+    <main className="mx-auto max-w-7xl px-4 py-8">
+      <header className="mb-8 flex items-center justify-between border-b border-zinc-900 pb-5">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">
-            Дашборд (замена Excel)
-          </h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            Доступность URL — каждые{" "}
-            {snap.meta?.intervalMs
-              ? `${snap.meta.intervalMs / 1000} с`
-              : "30 с"}
-            . Данные Firebase — с вашего аккаунта Google (не из таблицы).
-          </p>
-          {snap.lastError ? (
-            <p className="mt-2 text-sm text-amber-400" role="status">
-              Предупреждение: {snap.lastError}
-            </p>
-          ) : null}
+          <p className="text-xs text-zinc-600">Фуджи · Performance</p>
+          <h1 className="mt-2 text-2xl font-semibold text-white">Аналитика</h1>
         </div>
         <div className="flex items-center gap-4">
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 px-4 py-3 text-center">
-            <div className="text-2xl font-semibold tabular-nums text-white">
-              {ok}/{total}
-            </div>
-            <div className="text-xs text-zinc-500">URL доступно</div>
-          </div>
+          <span className="text-sm text-zinc-500">{session?.user?.email}</span>
           <button
             type="button"
             onClick={() => void logout()}
@@ -155,201 +159,736 @@ export function DashboardClient({ initial }: { initial: MonitorSnapshot }) {
             Выйти
           </button>
         </div>
-      </div>
+      </header>
 
-      <section className="mt-12">
-        <h2 className="text-lg font-medium text-white">
-          Firebase — выгрузка (Management API)
-        </h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Проект:{" "}
-          <code className="text-zinc-400">{fb?.projectId ?? "—"}</code>
-          {fb?.authSource ? (
-            <span className="ml-2 text-zinc-600">
-              (источник: {fb.authSource})
-            </span>
-          ) : null}
-          . Для API нужен ключ сервисного аккаунта Firebase на сервере или вход
-          через Google.
-        </p>
-
-        {fbErr ? (
-          <div
-            className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200"
-            role="status"
+      {!session?.user ? (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-6 text-sm text-zinc-500">
+          Загружаем дашборд…
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <ExpandableCard
+            title="Мониторинг сайта"
+            summary={`${sitePages.length} показателей${updatedAt ? ` · обновлено ${new Date(updatedAt).toLocaleTimeString("ru-RU")}` : ""}`}
+            badge={
+              sitePages.length > 0 ? (
+                <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
+                  {countSlowMetrics(sitePages)} медленных
+                </span>
+              ) : null
+            }
+            expanded={siteExpanded}
+            onToggle={() => setSiteExpanded((value) => !value)}
           >
-            {fbErr}
-          </div>
-        ) : null}
+            <MonitoringMetricsGrid
+              items={sitePages}
+              selectedKey={selectedSite ? pageKey(selectedSite) : null}
+              onSelect={setSiteSelectedKey}
+              page={sitePage}
+              loading={loading && !report}
+              onPageChange={setSitePage}
+            />
+            {selectedSite ? (
+              <MetricDetailPanel item={selectedSite} updatedAt={updatedAt} />
+            ) : loading && !report ? (
+              <ChartSkeleton compact />
+            ) : sitePages.length === 0 ? (
+              <EmptyHint text="Данные готовятся. Показатели появятся после первой загрузки." />
+            ) : null}
+          </ExpandableCard>
 
-        {fb ? (
-          <div className="mt-6 space-y-6">
-            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase tracking-wide text-zinc-500">
-                    <th className="px-4 py-3 font-medium">Поле</th>
-                    <th className="px-4 py-3 font-medium">Значение</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-800/80">
-                  {pickProjectFields(fb.project).map((row) => (
-                    <tr key={row.key} className="hover:bg-zinc-800/30">
-                      <td className="px-4 py-2 font-medium text-zinc-300">
-                        {row.key}
-                      </td>
-                      <td className="px-4 py-2 break-all text-zinc-400">
-                        {row.value}
-                      </td>
-                    </tr>
-                  ))}
-                  {pickProjectFields(fb.project).length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={2}
-                        className="px-4 py-6 text-center text-zinc-500"
-                      >
-                        Нет данных проекта (проверьте FIREBASE_PROJECT_ID и
-                        права аккаунта).
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
+          <ExpandableCard
+            title="Мониторинг мобильного приложения"
+            summary={`${mobilePages.length} показателей${updatedAt ? ` · обновлено ${new Date(updatedAt).toLocaleTimeString("ru-RU")}` : ""}`}
+            badge={
+              mobilePages.length > 0 ? (
+                <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
+                  {countSlowMetrics(mobilePages)} медленных
+                </span>
+              ) : null
+            }
+            expanded={mobileExpanded}
+            onToggle={() => setMobileExpanded((value) => !value)}
+          >
+            <MonitoringMetricsGrid
+              items={mobilePages}
+              selectedKey={selectedMobile ? pageKey(selectedMobile) : null}
+              onSelect={setMobileSelectedKey}
+              page={mobilePage}
+              loading={loading && !report}
+              onPageChange={setMobilePage}
+            />
+            {selectedMobile ? (
+              <MetricDetailPanel item={selectedMobile} updatedAt={updatedAt} />
+            ) : loading && !report ? (
+              <ChartSkeleton compact />
+            ) : mobilePages.length === 0 ? (
+              <EmptyHint text="Данные готовятся. Показатели появятся после первой загрузки." />
+            ) : null}
+          </ExpandableCard>
+
+          <ExpandableCard
+            title="Обращения"
+            summary={`${appealsSummary.total} за период · ${appealsSummary.open} открытых · ${appealsSummary.categories} категорий`}
+            badge={
+              appealsSummary.total > 0 ? (
+                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-200">
+                  {appealsSummary.closed} закрыто
+                </span>
+              ) : null
+            }
+            expanded={appealsExpanded}
+            onToggle={toggleAppealsExpanded}
+          >
+            <DateRangeFilter
+              dateFrom={appealsDateFrom}
+              dateTo={appealsDateTo}
+              onDateFromChange={setAppealsDateFrom}
+              onDateToChange={setAppealsDateTo}
+              onClear={() => {
+                setAppealsDateFrom(defaultAppealsDateFrom());
+                setAppealsDateTo(defaultAppealsDateTo());
+              }}
+            />
+
+            {appealsLoading ? (
+              <div className="mt-4 text-sm text-zinc-500">Обновляем данные…</div>
+            ) : null}
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <StatBlock
+                label="Показатели продуктов"
+                value={appealsSummary.qualityTotal}
+                hint={appealsPeriodLabel}
+                active={appealsDetailKey === "quality"}
+                onClick={() => setAppealsDetailKey("quality")}
+              />
+              <StatBlock
+                label="Категории"
+                value={appealsSummary.categories}
+                hint="типов проблем"
+                active={appealsDetailKey === "categories"}
+                onClick={() => setAppealsDetailKey("categories")}
+              />
+              <StatBlock
+                label="Курьеры"
+                value={appealsSummary.couriers}
+                hint="с повторами"
+                active={appealsDetailKey === "users"}
+                onClick={() => setAppealsDetailKey("users")}
+              />
+              <StatBlock
+                label="По неделям"
+                value={appealsSummary.total}
+                hint={appealsPeriodLabel}
+                active={appealsDetailKey === "weekly"}
+                onClick={() => setAppealsDetailKey("weekly")}
+              />
             </div>
 
-            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase tracking-wide text-zinc-500">
-                    <th className="px-4 py-3 font-medium">Платформа</th>
-                    <th className="px-4 py-3 font-medium">Имя</th>
-                    <th className="px-4 py-3 font-medium">App ID</th>
-                    <th className="px-4 py-3 font-medium">Пакет / bundle</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-800/80">
-                  {fb.apps.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={4}
-                        className="px-4 py-8 text-center text-zinc-500"
-                      >
-                        Приложения не получены
-                      </td>
-                    </tr>
-                  ) : (
-                    fb.apps.map((a) => (
-                      <tr key={`${a.platform}-${a.appId}`} className="hover:bg-zinc-800/30">
-                        <td className="px-4 py-2 text-zinc-300">{a.platform}</td>
-                        <td className="px-4 py-2 text-zinc-100">
-                          {a.displayName || "—"}
-                        </td>
-                        <td className="px-4 py-2 font-mono text-xs text-zinc-400">
-                          {a.appId}
-                        </td>
-                        <td className="px-4 py-2 text-zinc-400">{a.extra}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            {fb.apiErrors.length > 0 ? (
-              <div className="rounded-xl border border-red-500/25 bg-red-500/10 p-4 text-sm text-red-200">
-                <p className="font-medium">Ошибки API</p>
-                <ul className="mt-2 list-inside list-disc space-y-1">
-                  {fb.apiErrors.map((e) => (
-                    <li key={e}>{e}</li>
-                  ))}
-                </ul>
+            {appealsDetailKey === "quality" && appealReport ? (
+              <div className="mt-5">
+                <AnalyticsMatrix
+                  title="Показатели продуктов"
+                  weeks={appealReport.weeks}
+                  rows={appealReport.qualityRows}
+                />
               </div>
             ) : null}
 
-            <p className="text-xs text-zinc-600">
-              Обновлено:{" "}
-              {new Date(fb.fetchedAt).toLocaleString("ru-RU", {
-                dateStyle: "short",
-                timeStyle: "medium",
-              })}
-            </p>
-          </div>
-        ) : !fbErr ? (
-          <p className="mt-4 text-sm text-zinc-500">Загрузка Firebase…</p>
-        ) : null}
-      </section>
+            {appealsDetailKey === "categories" && appealReport ? (
+              <div className="mt-5">
+                <AnalyticsMatrix
+                  title="Категории обращений"
+                  weeks={appealReport.weeks}
+                  rows={appealReport.categoryRows}
+                />
+              </div>
+            ) : null}
 
-      <h2 className="mt-14 text-lg font-medium text-white">
-        Проверки URL (config/targets.json)
-      </h2>
-      <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40">
-        <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase tracking-wide text-zinc-500">
-              <th className="px-4 py-3 font-medium">Сервис</th>
-              <th className="px-4 py-3 font-medium">Статус</th>
-              <th className="hidden px-4 py-3 font-medium sm:table-cell">
-                HTTP
-              </th>
-              <th className="px-4 py-3 font-medium">Задержка</th>
-              <th className="hidden px-4 py-3 font-medium md:table-cell">
-                URL
-              </th>
+            {appealsDetailKey === "users" && appealReport ? (
+              <div className="mt-5">
+                <AnalyticsMatrix
+                  title="Повторные обращения по курьерам"
+                  weeks={appealReport.weeks}
+                  rows={appealReport.userRows.slice(0, 12)}
+                />
+              </div>
+            ) : null}
+
+            {appealsDetailKey === "weekly" ? (
+              <div className="mt-5 overflow-hidden rounded-xl border border-zinc-800">
+                <div className="bg-zinc-900/80 px-4 py-3 text-sm font-medium text-zinc-200">
+                  Статистика по неделям ({appealsPeriodLabel})
+                </div>
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-zinc-900/80 text-xs uppercase tracking-wide text-zinc-500">
+                    <tr>
+                      <th className="px-4 py-3 font-medium">Неделя</th>
+                      <th className="px-4 py-3 font-medium">Всего</th>
+                      <th className="px-4 py-3 font-medium">Закрыто</th>
+                      <th className="px-4 py-3 font-medium">В работе</th>
+                      <th className="px-4 py-3 font-medium">Среднее закрытие</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800">
+                    {appealRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-6 text-center text-zinc-500">
+                          Данные готовятся
+                        </td>
+                      </tr>
+                    ) : (
+                      appealRows.map((row) => (
+                        <tr key={row.label}>
+                          <td className="px-4 py-3 text-zinc-300">{row.label}</td>
+                          <td className="px-4 py-3 text-zinc-400">{row.total}</td>
+                          <td className="px-4 py-3 text-zinc-400">{row.closed}</td>
+                          <td className="px-4 py-3 text-zinc-400">{row.open}</td>
+                          <td className="px-4 py-3 text-zinc-400">
+                            {row.avgCloseHours == null ? "—" : `${row.avgCloseHours.toFixed(1)} ч`}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+            {!appealsDetailKey ? (
+              <EmptyHint text="Нажмите на блок показателя, чтобы открыть детализацию." />
+            ) : null}
+          </ExpandableCard>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function ExpandableCard({
+  title,
+  summary,
+  badge,
+  expanded,
+  onToggle,
+  children,
+}: {
+  title: string;
+  summary: string;
+  badge?: React.ReactNode;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <article className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/50">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-900"
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-white">{title}</span>
+            {badge}
+          </div>
+          <div className="mt-1 truncate text-xs text-zinc-500">{summary}</div>
+        </div>
+        <span className="text-zinc-500">{expanded ? "▲" : "▼"}</span>
+      </button>
+      {expanded ? <div className="border-t border-zinc-800 p-4">{children}</div> : null}
+    </article>
+  );
+}
+
+function StatBlock({
+  label,
+  value,
+  hint,
+  active,
+  onClick,
+}: {
+  label: string;
+  value: number;
+  hint: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        active
+          ? "rounded-xl border border-sky-400/50 bg-sky-500/10 p-4 text-left transition hover:border-sky-400/70"
+          : "rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-left transition hover:border-zinc-600"
+      }
+    >
+      <div className="text-2xl font-semibold text-white">{value}</div>
+      <div className="mt-1 text-sm text-zinc-300">{label}</div>
+      <div className="mt-0.5 text-xs text-zinc-500">{hint}</div>
+    </button>
+  );
+}
+
+function MonitoringMetricsGrid({
+  items,
+  selectedKey,
+  onSelect,
+  page,
+  loading,
+  onPageChange,
+}: {
+  items: HistoryPageMetric[];
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+  page: number;
+  loading: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * pageSize;
+  const visibleItems = items.slice(start, start + pageSize);
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs uppercase tracking-wide text-zinc-500">Показатели</p>
+        <div className="flex items-center gap-2 text-xs text-zinc-500">
+          <button
+            type="button"
+            onClick={() => onPageChange(Math.max(1, safePage - 1))}
+            disabled={safePage === 1 || loading}
+            className="rounded-md border border-zinc-800 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            назад
+          </button>
+          <span>
+            {safePage}/{totalPages}
+          </span>
+          <button
+            type="button"
+            onClick={() => onPageChange(Math.min(totalPages, safePage + 1))}
+            disabled={safePage === totalPages || loading}
+            className="rounded-md border border-zinc-800 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            вперёд
+          </button>
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-4">
+        {loading ? (
+          Array.from({ length: pageSize }, (_, idx) => <DataTileSkeleton key={`skeleton-${idx}`} />)
+        ) : items.length === 0 ? (
+          <EmptyHint text="данные готовятся" />
+        ) : (
+          visibleItems.map((item) => (
+            <DataTile
+              key={pageKey(item)}
+              item={item}
+              selected={selectedKey === pageKey(item)}
+              onClick={() => onSelect(pageKey(item))}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MetricDetailPanel({
+  item,
+  updatedAt,
+}: {
+  item: HistoryPageMetric;
+  updatedAt: string | null;
+}) {
+  return (
+    <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+      <p className="text-sm text-zinc-500">
+        {item.metricName} · {item.page}
+      </p>
+      <h3 className="mt-2 text-2xl font-semibold text-white">{formatTime(item.currentMs)}</h3>
+      <PerformanceChart points={item.chart} />
+      <div className="mt-4 flex flex-wrap gap-8 text-sm">
+        <MetricLegend label="среднее за 30 дней" value={formatTime(item.currentMs)} color="bg-blue-400" />
+        <MetricLegend label="сэмплы" value={String(item.samples)} color="bg-emerald-400" />
+        {updatedAt ? (
+          <MetricLegend
+            label="обновлено"
+            value={new Date(updatedAt).toLocaleTimeString("ru-RU")}
+            color="bg-zinc-700"
+          />
+        ) : null}
+      </div>
+      <WeeklySummaryTable rows={item.weekly} />
+    </div>
+  );
+}
+
+function AnalyticsMatrix({
+  title,
+  weeks,
+  rows,
+}: {
+  title: string;
+  weeks: string[];
+  rows: AppealsAnalyticsReport["categoryRows"];
+}) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-zinc-800">
+      <div className="bg-zinc-900/80 px-4 py-3 text-sm font-medium text-zinc-200">{title}</div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-left text-sm">
+          <thead className="bg-blue-500/10 text-xs text-blue-100">
+            <tr>
+              <th className="min-w-72 px-4 py-3 font-medium">Показатель</th>
+              {weeks.length === 0 ? (
+                <th className="px-4 py-3 font-medium">Нет данных</th>
+              ) : (
+                weeks.map((week) => (
+                  <th key={week} className="px-4 py-3 font-medium">
+                    {week}
+                  </th>
+                ))
+              )}
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-800/80">
-            {snap.results.length === 0 ? (
+          <tbody className="divide-y divide-zinc-800">
+            {rows.length === 0 ? (
               <tr>
-                <td
-                  colSpan={5}
-                  className="px-4 py-12 text-center text-zinc-500"
-                >
-                  Нет целей в config/targets.json
+                <td colSpan={weeks.length + 1} className="px-4 py-6 text-center text-zinc-500">
+                  Данные готовятся
                 </td>
               </tr>
             ) : (
-              snap.results.map((r) => (
-                <tr key={r.id} className="transition hover:bg-zinc-800/30">
-                  <td className="px-4 py-3 font-medium text-zinc-100">
-                    {r.name}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${statusStyles(r.status)}`}
-                    >
-                      {statusLabel(r.status)}
-                    </span>
-                  </td>
-                  <td className="hidden px-4 py-3 tabular-nums text-zinc-400 sm:table-cell">
-                    {r.httpStatus ?? "—"}
-                  </td>
-                  <td className="px-4 py-3 tabular-nums text-zinc-400">
-                    {r.latencyMs != null ? `${r.latencyMs} мс` : "—"}
-                  </td>
-                  <td className="hidden max-w-[220px] truncate px-4 py-3 text-zinc-500 md:table-cell">
-                    {r.url}
-                  </td>
+              rows.map((row) => (
+                <tr key={row.key}>
+                  <td className="px-4 py-3 text-zinc-300">{row.label}</td>
+                  {weeks.map((week) => (
+                    <td key={week} className="px-4 py-3 text-zinc-400">
+                      {row.values[week] ?? 0}
+                    </td>
+                  ))}
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
 
-      {snap.results.some((r) => r.error) ? (
-        <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-400">
-          <p className="font-medium text-zinc-300">Детали ошибок URL</p>
-          <ul className="mt-2 list-inside list-disc space-y-1">
-            {snap.results
-              .filter((r) => r.error)
-              .map((r) => (
-                <li key={`${r.id}-err`}>
-                  <span className="text-zinc-200">{r.name}</span>: {r.error}
-                </li>
-              ))}
-          </ul>
-        </div>
+function EmptyHint({ text }: { text: string }) {
+  return (
+    <div className="mt-4 rounded-lg border border-dashed border-zinc-800 px-4 py-3 text-sm text-zinc-500">
+      {text}
+    </div>
+  );
+}
+
+function summarizeAppeals(rows: AppealAnalyticsRow[], report: AppealsAnalyticsReport | null) {
+  const total = rows.reduce((sum, row) => sum + row.total, 0);
+  const closed = rows.reduce((sum, row) => sum + row.closed, 0);
+  const open = rows.reduce((sum, row) => sum + row.open, 0);
+  const categories =
+    report?.categoryRows.filter((row) => sumMetricValues(row) > 0).length ?? 0;
+  const couriers = report?.userRows.filter((row) => sumMetricValues(row) > 0).length ?? 0;
+  const qualityTotal = report
+    ? sumMetricValues(report.qualityRows.find((row) => row.key === "total"))
+    : total;
+
+  return { total, closed, open, categories, couriers, qualityTotal };
+}
+
+function sumMetricValues(row: AppealsAnalyticsReport["qualityRows"][number] | undefined) {
+  if (!row) return 0;
+  return Object.values(row.values).reduce<number>(
+    (sum, value) => sum + (typeof value === "number" ? value : 0),
+    0,
+  );
+}
+
+function countSlowMetrics(items: HistoryPageMetric[]) {
+  return items.filter((item) => (item.currentMs ?? 0) > 1500).length;
+}
+
+function DataTileSkeleton() {
+  return (
+    <div className="h-24 w-28 animate-pulse rounded-lg border border-zinc-800 bg-zinc-900 p-2">
+      <div className="h-2 w-16 rounded bg-zinc-800" />
+      <div className="mt-3 h-3 w-20 rounded bg-zinc-800" />
+      <div className="mt-2 h-3 w-14 rounded bg-zinc-800" />
+      <div className="mt-5 flex justify-between">
+        <div className="h-4 w-8 rounded bg-zinc-800" />
+        <div className="h-3 w-8 rounded bg-zinc-800" />
+      </div>
+    </div>
+  );
+}
+
+function DataTile({
+  item,
+  selected,
+  onClick,
+}: {
+  item: HistoryPageMetric;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const bad = (item.currentMs ?? 0) > 1500;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`h-24 w-28 rounded-lg border p-2 text-left transition ${
+        selected
+          ? "border-emerald-400 bg-emerald-400/20"
+          : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
+      }`}
+      title={`${item.metricName}: ${item.page}`}
+    >
+      <div className="truncate text-[10px] text-zinc-500">{item.metricName}</div>
+      <div className="mt-1 line-clamp-2 text-xs text-zinc-200">{item.page}</div>
+      <div className="mt-2 flex items-end justify-between">
+        <span
+          className={
+            bad ? "text-sm font-semibold text-red-300" : "text-sm font-semibold text-emerald-300"
+          }
+        >
+          {formatTime(item.currentMs)}
+        </span>
+        <span className="text-[11px] text-zinc-400">{item.samples}</span>
+      </div>
+    </button>
+  );
+}
+
+function MetricLegend({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: string;
+  color: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 text-zinc-500">
+        <span className={`h-2 w-2 rounded-full ${color}`} />
+        {label}
+      </div>
+      <p className="mt-1 text-lg font-semibold text-white">{value}</p>
+    </div>
+  );
+}
+
+function WeeklySummaryTable({ rows }: { rows: HistoryPageMetric["weekly"] }) {
+  return (
+    <div className="mt-6 overflow-hidden rounded-xl border border-zinc-800">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-zinc-900/80 text-xs uppercase tracking-wide text-zinc-500">
+          <tr>
+            <th className="px-4 py-3 font-medium">Неделя</th>
+            <th className="px-4 py-3 font-medium">Среднее</th>
+            <th className="px-4 py-3 font-medium">Минимум</th>
+            <th className="px-4 py-3 font-medium">Максимум</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-zinc-800">
+          {rows.map((row) => (
+            <tr key={row.label}>
+              <td className="px-4 py-3 text-zinc-300">{row.label}</td>
+              <td className="px-4 py-3 text-zinc-400">{formatTime(row.avgMs)}</td>
+              <td className="px-4 py-3 text-zinc-400">{formatTime(row.minMs)}</td>
+              <td className="px-4 py-3 text-zinc-400">{formatTime(row.maxMs)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ChartSkeleton({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      className={`${compact ? "mt-6" : "mt-8"} animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/40 p-5`}
+    >
+      <div className="h-3 w-64 rounded bg-zinc-800" />
+      <div className="mt-3 h-7 w-80 rounded bg-zinc-800" />
+      <div className="mt-8 h-64 rounded-lg border border-zinc-800 bg-zinc-950" />
+    </div>
+  );
+}
+
+function PerformanceChart({ points }: { points: HistoryChartPoint[] }) {
+  const width = 760;
+  const height = 260;
+  const padding = { top: 24, right: 24, bottom: 38, left: 54 };
+  const min = 0;
+  const max = Math.max(800, ...points.map((point) => point.valueMs ?? 0));
+  const x = (idx: number) =>
+    padding.left + (idx * (width - padding.left - padding.right)) / (points.length - 1);
+  const y = (value: number) =>
+    padding.top + ((max - value) * (height - padding.top - padding.bottom)) / (max - min);
+  const currentPath = makePath(
+    points
+      .map((point, idx) =>
+        point.valueMs == null ? null : ([x(idx), y(point.valueMs)] as const),
+      )
+      .filter((point): point is readonly [number, number] => point != null),
+  );
+
+  return (
+    <div className="mt-8 overflow-hidden">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
+        {makeTicks(max).map((tick) => (
+          <g key={tick}>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={y(tick)}
+              y2={y(tick)}
+              stroke="rgb(39 39 42)"
+              strokeWidth="1"
+            />
+            <text x={8} y={y(tick) + 4} fill="rgb(113 113 122)" fontSize="12">
+              {tick === 0 ? "0s" : `${tick} ms`}
+            </text>
+          </g>
+        ))}
+        {currentPath ? (
+          <path d={currentPath} fill="none" stroke="#6d7dfc" strokeWidth="3" />
+        ) : null}
+        {points.map((point, idx) => (
+          <g key={point.dayIndex}>
+            {point.valueMs == null ? null : (
+              <circle cx={x(idx)} cy={y(point.valueMs)} r="3.5" fill="#6d7dfc" />
+            )}
+            <text
+              x={x(idx)}
+              y={height - 10}
+              textAnchor="middle"
+              fill="rgb(113 113 122)"
+              fontSize="12"
+            >
+              {point.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function makePath(points: readonly (readonly [number, number])[]): string {
+  if (points.length === 0) return "";
+  return points
+    .map(([x, y], idx) => `${idx === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`)
+    .join(" ");
+}
+
+function formatTime(ms: number | null): string {
+  if (ms == null || Number.isNaN(ms)) return "—";
+  const rounded = Math.round(ms);
+  if (ms >= 1000) return `${Number((ms / 1000).toFixed(2))}s`;
+  return `${rounded} ms`;
+}
+
+function makeTicks(max: number): number[] {
+  const roundedMax = Math.ceil(max / 200) * 200;
+  return Array.from({ length: 5 }, (_, idx) => Math.round((roundedMax / 4) * idx));
+}
+
+async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text.trim()) {
+    return { error: `Пустой ответ API (${response.status})` } as T;
+  }
+  return JSON.parse(text) as T;
+}
+
+function pageKey(item: HistoryPageMetric): string {
+  return `${item.metricName}:${item.app}:${item.page}`;
+}
+
+function defaultAppealsDateFrom() {
+  const date = new Date();
+  date.setDate(date.getDate() - 30);
+  return toInputDate(date);
+}
+
+function defaultAppealsDateTo() {
+  return toInputDate(new Date());
+}
+
+function toInputDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatAppealsPeriodLabel(from: string, to: string) {
+  const format = (value: string) => {
+    const [year, month, day] = value.split("-");
+    return `${day}.${month}.${year}`;
+  };
+  return `${format(from)} — ${format(to)}`;
+}
+
+function DateRangeFilter({
+  dateFrom,
+  dateTo,
+  onDateFromChange,
+  onDateToChange,
+  onClear,
+}: {
+  dateFrom: string;
+  dateTo: string;
+  onDateFromChange: (value: string) => void;
+  onDateToChange: (value: string) => void;
+  onClear: () => void;
+}) {
+  const isDefault =
+    dateFrom === defaultAppealsDateFrom() && dateTo === defaultAppealsDateTo();
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2">
+      <span className="text-xs text-zinc-500">Период</span>
+      <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+        От
+        <input
+          type="date"
+          value={dateFrom}
+          max={dateTo || undefined}
+          onChange={(event) => onDateFromChange(event.target.value)}
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-100 outline-none focus:border-zinc-500 [color-scheme:dark]"
+        />
+      </label>
+      <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+        До
+        <input
+          type="date"
+          value={dateTo}
+          min={dateFrom || undefined}
+          onChange={(event) => onDateToChange(event.target.value)}
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-100 outline-none focus:border-zinc-500 [color-scheme:dark]"
+        />
+      </label>
+      {!isDefault ? (
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-xs text-sky-400 hover:text-sky-300"
+        >
+          Сбросить
+        </button>
       ) : null}
     </div>
   );

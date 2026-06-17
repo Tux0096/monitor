@@ -9,24 +9,27 @@
 3. **Project settings** (шестерёнка) → вкладка **Service accounts**.
 4. **Generate new private key** → подтвердите → скачается файл `*-firebase-adminsdk-*.json`.
 
-## 2. Положить ключ локально (не в git)
+## 2. Положить ключ на сервере (не в git)
 
-```text
-monitor-dashboard/scripts/secrets/firebase-sa.json
+```bash
+# на VM
+sudo mkdir -p /opt/monitor/secrets
+sudo chmod 700 /opt/monitor/secrets
+# скопируйте JSON вручную, например через scp с вашей машины один раз:
+# scp -i vm_deploy_key.pem *-firebase-adminsdk-*.json ubuntu@83.166.238.251:/opt/monitor/secrets/firebase-sa.json
+sudo chmod 600 /opt/monitor/secrets/firebase-sa.json
 ```
-
-Папка `scripts/secrets/` в `.gitignore`.
 
 ## 3. Переменные на сервере
 
-В `scripts/server.env.production` уже должно быть:
+В `/opt/monitor/.env.local` (только на VM, не в репозитории):
 
 ```env
 FIREBASE_PROJECT_ID=fuji-notifications
 GOOGLE_SERVICE_ACCOUNT_FILE=/opt/monitor/secrets/firebase-sa.json
 ```
 
-При `npm run deploy` ключ копируется **только в `/opt/monitor/secrets/`** — проект **fuji-crm** и nginx **не затрагиваются**.
+Деплой **не перезаписывает** `.env.local` и **не копирует** секреты с локальной машины.
 
 ## 4. Деплой
 

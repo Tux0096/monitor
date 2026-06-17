@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -24,6 +25,11 @@
 .DS_Store
 *.pem
 deploy_bundle.tar.gz
+deploy_bundle_*.tar.gz
+infra_bundle.tar.gz
+.cursor/
+docker-compose.production
+scripts/docker-compose.production
 scripts/deploy.env
 scripts/server.env.production
 scripts/secrets/

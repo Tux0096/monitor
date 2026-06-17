@@ -1,20 +1,15 @@
-import { Suspense } from "react";
 import { LoginForm } from "./login-form";
 
-export default function LoginPage() {
+type Props = {
+  searchParams: Promise<{ callbackUrl?: string }>;
+};
+
+export default async function LoginPage({ searchParams }: Props) {
+  const params = await searchParams;
+  const callbackUrl = params.callbackUrl ?? "/dashboard";
   const showGoogle = Boolean(
     process.env.GOOGLE_CLIENT_ID?.trim() &&
       process.env.GOOGLE_CLIENT_SECRET?.trim(),
   );
-  return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-500">
-          Загрузка…
-        </div>
-      }
-    >
-      <LoginForm showGoogle={showGoogle} />
-    </Suspense>
-  );
+  return <LoginForm showGoogle={showGoogle} callbackUrl={callbackUrl} />;
 }

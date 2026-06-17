@@ -8,12 +8,15 @@
     "start": "next start -H 0.0.0.0 -p 3000",
     "start:standalone": "node .next/standalone/server.js",
     "deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1",
+    "deploy:infra": "powershell -ExecutionPolicy Bypass -File scripts/deploy-infra.ps1",
+    "deploy:nginx": "powershell -ExecutionPolicy Bypass -File scripts/deploy-nginx.ps1",
     "lint": "eslint"
   },
   "dependencies": {
     "googleapis": "^171.4.0",
     "next": "16.2.4",
     "next-auth": "^5.0.0-beta.31",
+    "postgres": "^3.4.9",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

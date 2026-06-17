@@ -1,16 +1,15 @@
 "use client";
 
 import { signIn } from "next-auth/react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-type Props = { showGoogle: boolean };
+type Props = { showGoogle: boolean; callbackUrl: string };
 
-export function LoginForm({ showGoogle }: Props) {
+export function LoginForm({ showGoogle, callbackUrl }: Props) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get("callbackUrl") ?? "/dashboard";
 
+  const [email, setEmail] = useState("admin@it.franchise-fuji.ru");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -21,12 +20,13 @@ export function LoginForm({ showGoogle }: Props) {
     setPending(true);
     try {
       const res = await signIn("password", {
+        email,
         password,
         redirect: false,
         callbackUrl,
       });
       if (res?.error) {
-        setError("Неверный пароль");
+        setError("Неверный логин или пароль");
         return;
       }
       router.push(callbackUrl);
@@ -39,14 +39,19 @@ export function LoginForm({ showGoogle }: Props) {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/50 p-8 shadow-xl backdrop-blur">
-        <h1 className="text-center text-xl font-semibold tracking-tight text-zinc-50">
-          Мониторинг отказоустойчивости
-        </h1>
-        <p className="mt-2 text-center text-sm text-zinc-400">
-          Данные Firebase — после входа через Google
-        </p>
+    <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,#14352b_0,#09090b_45%,#050505_100%)] px-4 py-10">
+      <div className="w-full max-w-md rounded-3xl border border-white/10 bg-zinc-950/80 p-8 shadow-2xl shadow-emerald-950/30 backdrop-blur">
+        <div className="mb-8 text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/15 text-lg font-bold text-emerald-300 ring-1 ring-emerald-400/20">
+            IT
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">
+            Вход в мониторинг
+          </h1>
+          <p className="mt-2 text-sm text-zinc-400">
+            Панель отказоустойчивости IT-инфраструктуры Fuji
+          </p>
+        </div>
 
         {showGoogle ? (
           <>
@@ -87,38 +92,55 @@ export function LoginForm({ showGoogle }: Props) {
             </div>
           </>
         ) : (
-          <p className="mt-4 text-center text-xs text-amber-400/90">
-            Google OAuth не настроен: задайте GOOGLE_CLIENT_ID и
-            GOOGLE_CLIENT_SECRET в .env.local
-          </p>
+          null
         )}
 
         <form onSubmit={(e) => void onPasswordSubmit(e)} className="space-y-4">
-          <label className="block text-sm text-zinc-300">
-            Пароль дашборда
+          <label className="block text-sm font-medium text-zinc-300">
+            Логин
+            <input
+              type="email"
+              name="email"
+              autoComplete="username"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-zinc-100 outline-none ring-emerald-500/30 transition placeholder:text-zinc-600 focus:border-emerald-500 focus:ring-2"
+              placeholder="admin@it.franchise-fuji.ru"
+              required
+            />
+          </label>
+          <label className="block text-sm font-medium text-zinc-300">
+            Пароль
             <input
               type="password"
               name="password"
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-zinc-100 outline-none ring-emerald-500/40 focus:border-emerald-600 focus:ring-2"
+              className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-zinc-100 outline-none ring-emerald-500/30 transition placeholder:text-zinc-600 focus:border-emerald-500 focus:ring-2"
+              placeholder="Введите пароль"
               required
             />
           </label>
           {error ? (
-            <p className="text-sm text-red-400" role="alert">
+            <p
+              className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+              role="alert"
+            >
               {error}
             </p>
           ) : null}
           <button
             type="submit"
             disabled={pending}
-            className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
+            className="w-full rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {pending ? "Вход…" : "Войти по паролю"}
+            {pending ? "Входим…" : "Войти"}
           </button>
         </form>
+        <p className="mt-6 text-center text-xs text-zinc-500">
+          Доступ только для администратора системы мониторинга.
+        </p>
       </div>
     </div>
   );
