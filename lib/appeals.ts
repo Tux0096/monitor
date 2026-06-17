@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import type { MaxInlineKeyboard } from "@/lib/max-bot";
+import { sendMaxMessage, type MaxInlineKeyboard } from "@/lib/max-bot";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { suggestSupportReply } from "@/lib/support-ai";
 import {
@@ -577,6 +577,71 @@ export async function reopenAppeal(id: string): Promise<Appeal | null> {
   return updateAppealByOperator(id, { status: "open" });
 }
 
+function appealsShareCourier(left: Appeal, right: Appeal) {
+  if (left.maxUserId && right.maxUserId && left.maxUserId === right.maxUserId) return true;
+  const leftPhone = left.phone ? normalizePhoneForStorage(left.phone) : null;
+  const rightPhone = right.phone ? normalizePhoneForStorage(right.phone) : null;
+  return Boolean(leftPhone && rightPhone && leftPhone === rightPhone);
+}
+
+function toMergeCandidate(appeal: Appeal): MergeCandidate {
+  const problemLine =
+    appeal.issueText
+      .split("\n")
+      .find((line) => line.startsWith("Проблема:"))
+      ?.replace(/^Проблема:\s*/, "") ?? appeal.issueText;
+  return {
+    id: appeal.id,
+    appealNumber: appeal.appealNumber,
+    status: appeal.status,
+    createdAt: appeal.createdAt,
+    shortText: shorten(oneLine(problemLine), 80),
+    issuePreview: shorten(oneLine(problemLine), 160),
+  };
+}
+
+export async function listMergeCandidates(primaryId: string): Promise<MergeCandidate[]> {
+  await ensureAppealsSchema();
+  const primary = await getAppeal(primaryId);
+  if (!primary || primary.mergedIntoId) return [];
+
+  const normalizedPhone = primary.phone ? normalizePhoneForStorage(primary.phone) : null;
+  const rows = await sql()`
+    SELECT a.*
+    FROM support_appeals a
+    WHERE a.id <> ${primaryId}
+      AND a.merged_into_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM support_appeals child
+        WHERE child.merged_into_id = a.id
+      )
+      AND (
+        (${primary.maxUserId}::text IS NOT NULL AND a.max_user_id = ${primary.maxUserId})
+        OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone})
+      )
+    ORDER BY a.created_at DESC
+    LIMIT 30
+  `;
+
+  return rows.map((row) => toMergeCandidate(toAppeal(row)));
+}
+
+async function notifyCourierAppealsMerged(primary: Appeal, secondaries: Appeal[]) {
+  if (!primary.maxChatId || secondaries.length === 0) return;
+  const numbers = secondaries.map((appeal) => `№${appeal.appealNumber}`).join(", ");
+  const text = [
+    `Обращения ${numbers} объединены с №${primary.appealNumber}.`,
+    "Все сообщения и ответы теперь в одном чате.",
+    "Откройте мини-приложение «Курьер» и выберите главное обращение.",
+  ].join("\n");
+  try {
+    await sendMaxMessage(primary.maxChatId, text);
+  } catch {
+    // уведомление не должно блокировать объединение
+  }
+}
+
 export async function mergeAppealsInto(
   primaryId: string,
   secondaryIds: string[],
@@ -593,15 +658,21 @@ export async function mergeAppealsInto(
     throw new Error("Выберите обращения для объединения");
   }
 
+  const mergedSecondaries: Appeal[] = [];
+
   for (const secondaryId of uniqueSecondaryIds) {
     const secondary = await getAppeal(secondaryId);
     if (!secondary) continue;
+    if (!appealsShareCourier(primary, secondary)) {
+      throw new Error(`Обращение №${secondary.appealNumber} от другого курьера`);
+    }
     if (secondary.mergedIntoId) {
       throw new Error(`Обращение №${secondary.appealNumber} уже объединено`);
     }
     if (secondary.mergedAppeals.length > 0) {
       throw new Error(`Обращение №${secondary.appealNumber} уже является контуром для других обращений`);
     }
+    mergedSecondaries.push(secondary);
 
     await sql()`
       UPDATE support_messages
@@ -655,6 +726,8 @@ export async function mergeAppealsInto(
     SET updated_at = now()
     WHERE id = ${primaryId}
   `;
+
+  await notifyCourierAppealsMerged(primary, mergedSecondaries);
 
   return getAppeal(primaryId);
 }
@@ -766,6 +839,17 @@ export type CourierMiniAppAppealDetail = CourierMiniAppAppeal & {
   resultText: string | null;
   issueText: string;
   messages: CourierMiniAppMessage[];
+  mergedAppealNumbers: number[];
+  redirectedFromAppealNumber: number | null;
+};
+
+export type MergeCandidate = {
+  id: string;
+  appealNumber: number;
+  status: AppealStatus;
+  createdAt: string;
+  shortText: string;
+  issuePreview: string;
 };
 
 export type CourierMiniAppBootstrap = {
@@ -817,7 +901,7 @@ export async function markAppealReadByCourier(appealId: string, maxUserId: strin
   await sql()`
     UPDATE support_appeals
     SET courier_last_read_at = now(), updated_at = updated_at
-    WHERE id = ${appealId}
+    WHERE id = ${appeal.id}
   `;
   return true;
 }
@@ -868,7 +952,7 @@ function toCourierMiniAppMessage(message: SupportMessage): CourierMiniAppMessage
   };
 }
 
-async function getCourierOwnedAppeal(maxUserId: string, appealId: string, phone?: string | null) {
+async function getCourierAppealById(maxUserId: string, appealId: string, phone?: string | null) {
   await ensureAppealsSchema();
   const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
   const rows = await sql()`
@@ -884,7 +968,6 @@ async function getCourierOwnedAppeal(maxUserId: string, appealId: string, phone?
       LIMIT 1
     ) cp ON TRUE
     WHERE a.id = ${appealId}
-      AND a.merged_into_id IS NULL
       AND (
         a.max_user_id = ${maxUserId}
         OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone})
@@ -892,9 +975,38 @@ async function getCourierOwnedAppeal(maxUserId: string, appealId: string, phone?
     LIMIT 1
   `;
   if (!rows[0]) return null;
-  const appeal = toAppeal(rows[0]);
-  await attachMessages([appeal]);
-  return appeal;
+  return toAppeal(rows[0]);
+}
+
+async function resolveCourierAppealPrimary(
+  maxUserId: string,
+  appealId: string,
+  phone?: string | null,
+): Promise<{ appeal: Appeal; redirectedFrom: Appeal | null } | null> {
+  const requested = await getCourierAppealById(maxUserId, appealId, phone);
+  if (!requested) return null;
+
+  if (!requested.mergedIntoId) {
+    await attachMessages([requested]);
+    await attachMergedAppeals([requested]);
+    return { appeal: requested, redirectedFrom: null };
+  }
+
+  const primary = await getAppeal(requested.mergedIntoId);
+  if (!primary || primary.mergedIntoId) return null;
+  if (!appealsShareCourier(requested, primary)) return null;
+
+  await attachMessages([primary]);
+  await attachMergedAppeals([primary]);
+  return { appeal: primary, redirectedFrom: requested };
+}
+
+async function getCourierOwnedAppeal(maxUserId: string, appealId: string, phone?: string | null) {
+  const resolved = await resolveCourierAppealPrimary(maxUserId, appealId, phone);
+  if (!resolved || resolved.redirectedFrom) {
+    return resolved?.appeal ?? null;
+  }
+  return resolved.appeal;
 }
 
 export async function listCourierMiniAppAppeals(
@@ -913,12 +1025,13 @@ export async function getCourierMiniAppAppealDetail(
   appealId: string,
   phone?: string | null,
 ): Promise<CourierMiniAppAppealDetail | null> {
-  const appeal = await getCourierOwnedAppeal(maxUserId, appealId, phone);
-  if (!appeal) return null;
+  const resolved = await resolveCourierAppealPrimary(maxUserId, appealId, phone);
+  if (!resolved) return null;
+  const { appeal, redirectedFrom } = resolved;
   await sql()`
     UPDATE support_appeals
     SET courier_last_read_at = now(), updated_at = updated_at
-    WHERE id = ${appealId}
+    WHERE id = ${appeal.id}
   `;
   appeal.courierLastReadAt = new Date().toISOString();
   attachUnreadCounts([appeal], "courier");
@@ -928,6 +1041,8 @@ export async function getCourierMiniAppAppealDetail(
     resultText: appeal.resultText,
     issueText: appeal.issueText,
     messages: appeal.messages.map(toCourierMiniAppMessage),
+    mergedAppealNumbers: appeal.mergedAppeals.map((item) => item.appealNumber),
+    redirectedFromAppealNumber: redirectedFrom?.appealNumber ?? null,
   };
 }
 
@@ -939,10 +1054,11 @@ export async function addCourierMiniAppAppealMessage(input: {
   text?: string;
   photoUrl?: string | null;
 }) {
-  const appeal = await getCourierOwnedAppeal(input.maxUserId, input.appealId, input.phone);
-  if (!appeal) {
+  const resolved = await resolveCourierAppealPrimary(input.maxUserId, input.appealId, input.phone);
+  if (!resolved) {
     throw new Error("Обращение не найдено");
   }
+  const appeal = resolved.appeal;
 
   const text = input.text?.trim() ?? "";
   const photoUrl = input.photoUrl ?? null;

@@ -34,6 +34,8 @@ type AppealDetail = CourierAppeal & {
   resultText: string | null;
   issueText: string;
   messages: CourierMessage[];
+  mergedAppealNumbers: number[];
+  redirectedFromAppealNumber: number | null;
 };
 
 type Bootstrap = {
@@ -550,6 +552,16 @@ export function CourierApp() {
         </div>
 
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {appealDetail.redirectedFromAppealNumber ? (
+            <div className="rounded-2xl border border-violet-400/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
+              Обращение №{appealDetail.redirectedFromAppealNumber} объединено с №{appealDetail.appealNumber}. Показан общий чат.
+            </div>
+          ) : null}
+          {appealDetail.mergedAppealNumbers.length > 0 ? (
+            <div className="rounded-2xl border border-violet-400/20 bg-violet-500/5 px-4 py-3 text-xs text-violet-100/90">
+              В этот контур входят обращения: №{appealDetail.mergedAppealNumbers.join(", №")}
+            </div>
+          ) : null}
           <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-zinc-300">
             <p className="text-xs uppercase tracking-wide text-zinc-500">Описание</p>
             <p className="mt-2 whitespace-pre-wrap">{appealDetail.shortText}</p>

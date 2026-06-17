@@ -29,6 +29,15 @@ type AppealDraft = {
   operatorReply: string;
 };
 
+type MergeCandidate = {
+  id: string;
+  appealNumber: number;
+  status: Appeal["status"];
+  createdAt: string;
+  shortText: string;
+  issuePreview: string;
+};
+
 export function AppealsClient() {
   const searchParams = useSearchParams();
   const courierFilter = searchParams.get("courier");
@@ -515,6 +524,7 @@ export function AppealsClient() {
                             }
                             onSend={(close) => void sendReply(appeal.id, close)}
                             onClose={() => void close(appeal.id)}
+                            onMerged={() => void loadAppeals()}
                           />
 
                           {mergeMode ? (
@@ -835,13 +845,73 @@ function AppealReplyPanel({
   onReplyChange,
   onSend,
   onClose,
+  onMerged,
 }: {
   appeal: Appeal;
   replyText: string;
   onReplyChange: (text: string) => void;
   onSend: (close: boolean) => void;
   onClose: () => void;
+  onMerged: () => void;
 }) {
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [candidates, setCandidates] = useState<MergeCandidate[]>([]);
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  const [merging, setMerging] = useState(false);
+
+  const selectedCount = Object.values(selectedIds).filter(Boolean).length;
+  const hasContour = appeal.mergedAppeals.length > 0;
+
+  async function loadCandidates() {
+    setLoadingCandidates(true);
+    setMergeError(null);
+    try {
+      const response = await fetch(`/api/appeals/${appeal.id}/merge-candidates`, { cache: "no-store" });
+      if (!response.ok) {
+        setMergeError("Не удалось загрузить список обращений");
+        return;
+      }
+      const data = (await response.json()) as { candidates: MergeCandidate[] };
+      setCandidates(data.candidates);
+      setSelectedIds({});
+    } finally {
+      setLoadingCandidates(false);
+    }
+  }
+
+  async function openMerge() {
+    setMergeOpen(true);
+    await loadCandidates();
+  }
+
+  async function runMerge(ids: string[]) {
+    if (ids.length === 0) {
+      setMergeError("Выберите обращения для объединения");
+      return;
+    }
+    setMerging(true);
+    setMergeError(null);
+    try {
+      const response = await fetch(`/api/appeals/${appeal.id}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appealIds: ids }),
+      });
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        setMergeError(data?.error ?? "Не удалось объединить");
+        return;
+      }
+      setMergeOpen(false);
+      setSelectedIds({});
+      onMerged();
+    } finally {
+      setMerging(false);
+    }
+  }
+
   return (
     <div className="mt-4 space-y-3">
       {appeal.aiSummary && appeal.status !== "closed" ? (
@@ -886,7 +956,93 @@ function AppealReplyPanel({
             Закрыть без отправки
           </button>
         ) : null}
+        <button
+          type="button"
+          onClick={() => void (mergeOpen ? setMergeOpen(false) : openMerge())}
+          className={
+            mergeOpen
+              ? "rounded-lg border border-violet-400/50 bg-violet-500/15 px-4 py-2 text-sm text-violet-100"
+              : "rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:border-violet-400/60"
+          }
+        >
+          {mergeOpen ? "Скрыть объединение" : "Объединить обращения"}
+        </button>
       </div>
+
+      {mergeOpen ? (
+        <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium text-violet-100">
+              Дубли курьера в №{appeal.appealNumber}
+              {hasContour ? ` · контур ${appeal.mergedAppeals.length + 1}` : ""}
+            </div>
+            {candidates.length > 0 ? (
+              <button
+                type="button"
+                disabled={merging}
+                onClick={() => void runMerge(candidates.map((item) => item.id))}
+                className="text-xs text-violet-200 underline hover:text-white disabled:opacity-40"
+              >
+                Объединить все ({candidates.length})
+              </button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-violet-100/80">
+            Выберите другие обращения этого курьера — история и сообщения перейдут сюда, курьер получит
+            уведомление в MAX.
+          </p>
+          {loadingCandidates ? (
+            <p className="mt-3 text-xs text-violet-200/70">Загружаем список…</p>
+          ) : candidates.length === 0 ? (
+            <p className="mt-3 text-xs text-violet-200/70">Других обращений этого курьера для объединения нет.</p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {candidates.map((candidate) => (
+                <li key={candidate.id}>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-violet-500/20 bg-zinc-950/60 px-3 py-2 hover:border-violet-400/30">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selectedIds[candidate.id])}
+                      onChange={(event) =>
+                        setSelectedIds((current) => ({
+                          ...current,
+                          [candidate.id]: event.target.checked,
+                        }))
+                      }
+                      className="mt-1 rounded border-zinc-600 bg-zinc-900 text-violet-500"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="text-sm font-medium text-violet-50">№{candidate.appealNumber}</span>
+                      <span className="ml-2 text-xs text-violet-200/70">
+                        {new Date(candidate.createdAt).toLocaleString("ru-RU")}
+                        {candidate.status === "closed" ? " · закрыто" : ""}
+                      </span>
+                      <span className="mt-1 block text-xs text-violet-100/80">{candidate.issuePreview}</span>
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+          {mergeError ? <p className="mt-2 text-xs text-rose-300">{mergeError}</p> : null}
+          {candidates.length > 0 ? (
+            <button
+              type="button"
+              disabled={merging || selectedCount === 0}
+              onClick={() =>
+                void runMerge(
+                  Object.entries(selectedIds)
+                    .filter(([, checked]) => checked)
+                    .map(([id]) => id),
+                )
+              }
+              className="mt-3 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
+            >
+              {merging ? "Объединяем…" : `Объединить выбранные (${selectedCount})`}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
