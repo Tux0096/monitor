@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type AppealStatus = "open" | "in_progress" | "closed";
 
@@ -13,10 +13,26 @@ type CourierProfile = {
 };
 
 type CourierAppeal = {
+  id: string;
   appealNumber: number;
   status: AppealStatus;
   createdAt: string;
   shortText: string;
+};
+
+type CourierMessage = {
+  id: string;
+  author: "courier" | "operator" | "bot" | "ai" | "system";
+  text: string;
+  photoUrl: string | null;
+  createdAt: string;
+};
+
+type AppealDetail = CourierAppeal & {
+  photoUrl: string | null;
+  resultText: string | null;
+  issueText: string;
+  messages: CourierMessage[];
 };
 
 type Bootstrap = {
@@ -25,7 +41,7 @@ type Bootstrap = {
   appeals: CourierAppeal[];
 };
 
-type Screen = "loading" | "phone" | "home" | "form" | "success";
+type Screen = "loading" | "phone" | "home" | "form" | "success" | "appeal";
 
 type MaxWebApp = {
   ready: () => void;
@@ -67,6 +83,10 @@ function statusLabel(status: AppealStatus) {
   }
 }
 
+function isActive(status: AppealStatus) {
+  return status !== "closed";
+}
+
 function formatDate(value: string | null) {
   if (!value) return "—";
   return new Date(value).toLocaleString("ru-RU", {
@@ -81,12 +101,36 @@ function displayName(profile: CourierProfile) {
   return [profile.displayName, profile.lastName].filter(Boolean).join(" ") || "Курьер";
 }
 
+function authorLabel(author: CourierMessage["author"]) {
+  switch (author) {
+    case "courier":
+      return "Вы";
+    case "operator":
+      return "Оператор";
+    case "ai":
+      return "Поддержка";
+    case "system":
+      return "Система";
+    default:
+      return "Бот";
+  }
+}
+
 async function postJson<T>(url: string, initData: string, body: Record<string, unknown> = {}) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ initData, ...body }),
   });
+  const data = (await response.json().catch(() => null)) as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(data?.error ?? "Ошибка запроса");
+  }
+  return data;
+}
+
+async function getJson<T>(url: string) {
+  const response = await fetch(url, { cache: "no-store" });
   const data = (await response.json().catch(() => null)) as T & { error?: string };
   if (!response.ok) {
     throw new Error(data?.error ?? "Ошибка запроса");
@@ -117,7 +161,7 @@ function signalMaxReady(app?: MaxWebApp) {
   try {
     app?.ready?.();
   } catch {
-    // ignore bridge errors
+    // ignore
   }
 }
 
@@ -125,6 +169,7 @@ export function CourierApp() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [initData, setInitData] = useState("");
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [appealDetail, setAppealDetail] = useState<AppealDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -136,6 +181,11 @@ export function CourierApp() {
   const [photoData, setPhotoData] = useState<string | null>(null);
   const [successText, setSuccessText] = useState("");
 
+  const [chatText, setChatText] = useState("");
+  const [chatPhotoPreview, setChatPhotoPreview] = useState<string | null>(null);
+  const [chatPhotoData, setChatPhotoData] = useState<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
   const webApp = typeof window !== "undefined" ? window.WebApp : undefined;
 
   const loadSession = useCallback(async (data: string) => {
@@ -145,21 +195,28 @@ export function CourierApp() {
     return result;
   }, []);
 
+  const loadAppeal = useCallback(
+    async (appealId: string) => {
+      const data = await getJson<{ appeal: AppealDetail }>(
+        `/api/max/app/appeals/${appealId}?initData=${encodeURIComponent(initData)}`,
+      );
+      setAppealDetail(data.appeal);
+      return data.appeal;
+    },
+    [initData],
+  );
+
   useEffect(() => {
     let cancelled = false;
-
     void (async () => {
       const app = await waitForMaxBridge();
       if (cancelled) return;
-
       signalMaxReady(app ?? undefined);
-
       if (!app?.initData) {
         setError("Не удалось получить данные MAX. Закройте и откройте приложение кнопкой «Открыть».");
         setScreen("phone");
         return;
       }
-
       setInitData(app.initData);
       try {
         await loadSession(app.initData);
@@ -169,7 +226,6 @@ export function CourierApp() {
         setScreen("phone");
       }
     })();
-
     return () => {
       cancelled = true;
     };
@@ -177,12 +233,16 @@ export function CourierApp() {
 
   const goHome = useCallback(() => {
     setScreen("home");
+    setAppealDetail(null);
     setDescription("");
     setPhoneModel("");
     setOs("");
     setAppVersion("");
     setPhotoPreview(null);
     setPhotoData(null);
+    setChatText("");
+    setChatPhotoPreview(null);
+    setChatPhotoData(null);
     setError(null);
     webApp?.disableClosingConfirmation();
     webApp?.BackButton.hide();
@@ -195,18 +255,39 @@ export function CourierApp() {
     webApp?.BackButton.show();
   }, [webApp]);
 
+  const openAppeal = useCallback(
+    async (appealId: string) => {
+      setPending(true);
+      setError(null);
+      try {
+        await loadAppeal(appealId);
+        setScreen("appeal");
+        webApp?.enableClosingConfirmation();
+        webApp?.BackButton.show();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Не удалось открыть обращение");
+      } finally {
+        setPending(false);
+      }
+    },
+    [loadAppeal, webApp],
+  );
+
   useEffect(() => {
     const app = window.WebApp;
     if (!app) return;
-
     const onBack = () => goHome();
-    if (screen === "form") {
+    if (screen === "form" || screen === "appeal") {
       app.BackButton.onClick(onBack);
       return () => app.BackButton.offClick(onBack);
     }
     app.BackButton.hide();
     return undefined;
   }, [screen, goHome]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [appealDetail?.messages.length, screen]);
 
   async function requestPhone() {
     const app = window.WebApp;
@@ -228,16 +309,14 @@ export function CourierApp() {
       await app.HapticFeedback?.notificationOccurred("success");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Не удалось получить телефон";
-      if (!/refused|отказ/i.test(message)) {
-        setError(message);
-      }
+      if (!/refused|отказ/i.test(message)) setError(message);
       await window.WebApp?.HapticFeedback?.notificationOccurred("error");
     } finally {
       setPending(false);
     }
   }
 
-  function onPhotoSelected(file: File | null) {
+  function onPhotoSelected(file: File | null, target: "form" | "chat") {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       setError("Можно прикрепить только изображение");
@@ -250,8 +329,13 @@ export function CourierApp() {
     const reader = new FileReader();
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : null;
-      setPhotoPreview(result);
-      setPhotoData(result);
+      if (target === "form") {
+        setPhotoPreview(result);
+        setPhotoData(result);
+      } else {
+        setChatPhotoPreview(result);
+        setChatPhotoData(result);
+      }
       setError(null);
     };
     reader.readAsDataURL(file);
@@ -289,8 +373,39 @@ export function CourierApp() {
     }
   }
 
+  async function sendChatMessage(e: React.FormEvent) {
+    e.preventDefault();
+    if (!initData || !appealDetail) return;
+    const text = chatText.trim();
+    if (!text && !chatPhotoData) return;
+
+    setPending(true);
+    setError(null);
+    try {
+      const data = await postJson<{ appeal: AppealDetail }>(
+        `/api/max/app/appeals/${appealDetail.id}`,
+        initData,
+        { text, photoData: chatPhotoData },
+      );
+      setAppealDetail(data.appeal);
+      setChatText("");
+      setChatPhotoPreview(null);
+      setChatPhotoData(null);
+      const refreshed = await postJson<Bootstrap>("/api/max/app/session", initData);
+      setBootstrap(refreshed);
+      await webApp?.HapticFeedback?.notificationOccurred("success");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось отправить сообщение");
+      await webApp?.HapticFeedback?.notificationOccurred("error");
+    } finally {
+      setPending(false);
+    }
+  }
+
   const profile = bootstrap?.profile;
   const appeals = bootstrap?.appeals ?? [];
+  const activeAppeals = appeals.filter((a) => isActive(a.status));
+  const historyAppeals = appeals.filter((a) => !isActive(a.status));
 
   const shellClass =
     "min-h-dvh bg-[linear-gradient(180deg,#102820_0%,#0a1411_38%,#070b0a_100%)] text-zinc-50";
@@ -314,22 +429,19 @@ export function CourierApp() {
             <p className="text-xs uppercase tracking-[0.2em] text-emerald-300/80">Фуджи · курьеры</p>
             <h1 className="mt-3 text-2xl font-semibold">Личный кабинет</h1>
             <p className="mt-3 text-sm leading-6 text-zinc-300">
-              Номер телефона запрашивается один раз из вашего аккаунта MAX. После этого откроется
-              карточка и форма обращения.
+              Номер телефона запрашивается один раз из вашего аккаунта MAX.
             </p>
           </div>
-
           {error ? (
             <div className="mb-4 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
               {error}
             </div>
           ) : null}
-
           <button
             type="button"
             disabled={pending || !webApp}
             onClick={requestPhone}
-            className="w-full rounded-2xl bg-emerald-500 px-4 py-4 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-60"
+            className="w-full rounded-2xl bg-emerald-500 px-4 py-4 text-base font-semibold text-emerald-950 disabled:opacity-60"
           >
             {pending ? "Запрос…" : "Передать мой телефон"}
           </button>
@@ -346,7 +458,6 @@ export function CourierApp() {
             <h1 className="text-2xl font-semibold">Новое обращение</h1>
             <p className="mt-2 text-sm text-zinc-400">Заполните форму — оператор получит все данные сразу.</p>
           </div>
-
           <label className="block space-y-2">
             <span className="text-sm font-medium text-zinc-200">Описание проблемы</span>
             <textarea
@@ -355,80 +466,34 @@ export function CourierApp() {
               rows={5}
               required
               minLength={8}
-              placeholder="Что именно не работает? Когда началось?"
+              placeholder="Что именно не работает?"
               className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none ring-emerald-400/40 placeholder:text-zinc-500 focus:ring-2"
             />
           </label>
-
           <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-medium">Фото или скриншот</p>
-                <p className="text-xs text-zinc-400">Помогает быстрее разобраться</p>
-              </div>
+              <p className="text-sm font-medium">Фото или скриншот</p>
               <label className="cursor-pointer rounded-xl bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-200 ring-1 ring-emerald-400/20">
                 Добавить
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => onPhotoSelected(e.target.files?.[0] ?? null)}
-                />
+                <input type="file" accept="image/*" className="hidden" onChange={(e) => onPhotoSelected(e.target.files?.[0] ?? null, "form")} />
               </label>
             </div>
-            {photoPreview ? (
-              <img
-                src={photoPreview}
-                alt="Превью"
-                className="max-h-48 w-full rounded-xl object-cover"
-              />
-            ) : null}
+            {photoPreview ? <img src={photoPreview} alt="Превью" className="max-h-48 w-full rounded-xl object-cover" /> : null}
           </div>
-
           <label className="block space-y-2">
             <span className="text-sm font-medium text-zinc-200">Модель телефона</span>
-            <input
-              value={phoneModel}
-              onChange={(e) => setPhoneModel(e.target.value)}
-              placeholder="Например, Samsung Galaxy A54"
-              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none ring-emerald-400/40 placeholder:text-zinc-500 focus:ring-2"
-            />
+            <input value={phoneModel} onChange={(e) => setPhoneModel(e.target.value)} className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-emerald-400/40" />
           </label>
-
           <label className="block space-y-2">
-            <span className="text-sm font-medium text-zinc-200">Операционная система</span>
-            <select
-              value={os}
-              onChange={(e) => setOs(e.target.value)}
-              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none ring-emerald-400/40 focus:ring-2"
-            >
+            <span className="text-sm font-medium text-zinc-200">ОС</span>
+            <select value={os} onChange={(e) => setOs(e.target.value)} className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-emerald-400/40">
               <option value="">Не указано</option>
               <option value="Android">Android</option>
               <option value="iOS">iOS</option>
             </select>
           </label>
-
-          <label className="block space-y-2">
-            <span className="text-sm font-medium text-zinc-200">Версия приложения</span>
-            <input
-              value={appVersion}
-              onChange={(e) => setAppVersion(e.target.value)}
-              placeholder="Если знаете"
-              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none ring-emerald-400/40 placeholder:text-zinc-500 focus:ring-2"
-            />
-          </label>
-
-          {error ? (
-            <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
-              {error}
-            </div>
-          ) : null}
-
-          <button
-            type="submit"
-            disabled={pending || description.trim().length < 8}
-            className="w-full rounded-2xl bg-emerald-500 px-4 py-4 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-60"
-          >
+          {error ? <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
+          <button type="submit" disabled={pending || description.trim().length < 8} className="w-full rounded-2xl bg-emerald-500 px-4 py-4 text-base font-semibold text-emerald-950 disabled:opacity-60">
             {pending ? "Отправка…" : "Отправить обращение"}
           </button>
         </form>
@@ -442,14 +507,99 @@ export function CourierApp() {
         <div className="mx-auto max-w-md rounded-3xl border border-emerald-400/20 bg-emerald-500/10 p-6">
           <h1 className="text-xl font-semibold text-emerald-100">Готово</h1>
           <p className="mt-4 whitespace-pre-wrap text-sm leading-6 text-zinc-100">{successText}</p>
-          <button
-            type="button"
-            onClick={goHome}
-            className="mt-6 w-full rounded-2xl bg-emerald-500 px-4 py-3 font-semibold text-emerald-950"
-          >
+          <button type="button" onClick={goHome} className="mt-6 w-full rounded-2xl bg-emerald-500 px-4 py-3 font-semibold text-emerald-950">
             Вернуться в кабинет
           </button>
         </div>
+      </main>
+    );
+  }
+
+  if (screen === "appeal" && appealDetail) {
+    return (
+      <main className={`${shellClass} flex min-h-dvh flex-col`}>
+        <div className="border-b border-white/10 px-5 py-4">
+          <h1 className="text-lg font-semibold">Обращение №{appealDetail.appealNumber}</h1>
+          <p className="mt-1 text-xs text-emerald-300/90">{statusLabel(appealDetail.status)} · {formatDate(appealDetail.createdAt)}</p>
+        </div>
+
+        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-zinc-300">
+            <p className="text-xs uppercase tracking-wide text-zinc-500">Описание</p>
+            <p className="mt-2 whitespace-pre-wrap">{appealDetail.shortText}</p>
+            {appealDetail.photoUrl ? (
+              <a href={appealDetail.photoUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-emerald-300">
+                Открыть фото обращения
+              </a>
+            ) : null}
+          </div>
+
+          {appealDetail.resultText && appealDetail.status === "closed" ? (
+            <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-3 text-sm text-emerald-50">
+              <p className="text-xs uppercase tracking-wide text-emerald-200/80">Итог</p>
+              <p className="mt-2 whitespace-pre-wrap">{appealDetail.resultText}</p>
+            </div>
+          ) : null}
+
+          {appealDetail.messages.map((message) => {
+            const mine = message.author === "courier";
+            return (
+              <div key={message.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={
+                    mine
+                      ? "max-w-[85%] rounded-2xl rounded-br-md bg-emerald-500/20 px-3 py-2 text-sm text-emerald-50"
+                      : "max-w-[85%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm text-zinc-100"
+                  }
+                >
+                  <p className="mb-1 text-[10px] uppercase tracking-wide opacity-70">{authorLabel(message.author)}</p>
+                  {message.text && message.text !== "[фото]" ? (
+                    <p className="whitespace-pre-wrap">{message.text}</p>
+                  ) : null}
+                  {message.photoUrl ? (
+                    <a href={message.photoUrl} target="_blank" rel="noreferrer">
+                      <img src={message.photoUrl} alt="Фото" className="mt-2 max-h-40 rounded-lg object-cover" />
+                    </a>
+                  ) : null}
+                  <p className="mt-1 text-[10px] opacity-60">{formatDate(message.createdAt)}</p>
+                </div>
+              </div>
+            );
+          })}
+          <div ref={chatEndRef} />
+        </div>
+
+        <form onSubmit={sendChatMessage} className="border-t border-white/10 bg-black/30 px-4 py-3 pb-5">
+          {error ? <div className="mb-2 rounded-xl border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">{error}</div> : null}
+          {chatPhotoPreview ? (
+            <div className="mb-2 flex items-center gap-2">
+              <img src={chatPhotoPreview} alt="Превью" className="h-14 w-14 rounded-lg object-cover" />
+              <button type="button" onClick={() => { setChatPhotoPreview(null); setChatPhotoData(null); }} className="text-xs text-zinc-400">
+                Убрать
+              </button>
+            </div>
+          ) : null}
+          <div className="flex items-end gap-2">
+            <label className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl bg-white/10 text-lg">
+              📷
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => onPhotoSelected(e.target.files?.[0] ?? null, "chat")} />
+            </label>
+            <textarea
+              value={chatText}
+              onChange={(e) => setChatText(e.target.value)}
+              rows={2}
+              placeholder="Сообщение оператору…"
+              className="min-h-[44px] flex-1 resize-none rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400/40"
+            />
+            <button
+              type="submit"
+              disabled={pending || (!chatText.trim() && !chatPhotoData)}
+              className="h-11 shrink-0 rounded-xl bg-emerald-500 px-4 text-sm font-semibold text-emerald-950 disabled:opacity-50"
+            >
+              →
+            </button>
+          </div>
+        </form>
       </main>
     );
   }
@@ -469,44 +619,60 @@ export function CourierApp() {
               <dt className="text-zinc-500">Обращений</dt>
               <dd className="mt-1 font-medium">{profile?.totalAppeals ?? 0}</dd>
             </div>
-            <div className="col-span-2">
-              <dt className="text-zinc-500">Последнее обращение</dt>
-              <dd className="mt-1 font-medium">{formatDate(profile?.lastAppealAt ?? null)}</dd>
-            </div>
           </dl>
         </div>
 
-        <button
-          type="button"
-          onClick={openForm}
-          className="w-full rounded-2xl bg-emerald-500 px-4 py-4 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400"
-        >
+        <button type="button" onClick={openForm} className="w-full rounded-2xl bg-emerald-500 px-4 py-4 text-base font-semibold text-emerald-950">
           Создать обращение
         </button>
 
-        <section className="rounded-3xl border border-white/10 bg-white/5 p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">Последние обращения</h2>
-          {appeals.length === 0 ? (
-            <p className="mt-4 text-sm text-zinc-500">Пока нет обращений</p>
-          ) : (
-            <ul className="mt-4 space-y-3">
-              {appeals.map((appeal) => (
-                <li
-                  key={appeal.appealNumber}
-                  className="rounded-2xl border border-white/5 bg-black/20 px-4 py-3"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-medium">№{appeal.appealNumber}</span>
-                    <span className="text-xs text-emerald-300/90">{statusLabel(appeal.status)}</span>
-                  </div>
-                  <p className="mt-1 text-xs text-zinc-500">{formatDate(appeal.createdAt)}</p>
-                  <p className="mt-2 text-sm text-zinc-300">{appeal.shortText}</p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <AppealList title="Активные обращения" empty="Нет активных обращений" appeals={activeAppeals} onOpen={openAppeal} pending={pending} />
+        <AppealList title="История" empty="История пуста" appeals={historyAppeals} onOpen={openAppeal} pending={pending} />
       </div>
     </main>
+  );
+}
+
+function AppealList({
+  title,
+  empty,
+  appeals,
+  onOpen,
+  pending,
+}: {
+  title: string;
+  empty: string;
+  appeals: CourierAppeal[];
+  onOpen: (id: string) => void;
+  pending: boolean;
+}) {
+  return (
+    <section className="rounded-3xl border border-white/10 bg-white/5 p-5">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">{title}</h2>
+      {appeals.length === 0 ? (
+        <p className="mt-4 text-sm text-zinc-500">{empty}</p>
+      ) : (
+        <ul className="mt-4 space-y-3">
+          {appeals.map((appeal) => (
+            <li key={appeal.id}>
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => void onOpen(appeal.id)}
+                className="w-full rounded-2xl border border-white/5 bg-black/20 px-4 py-3 text-left transition hover:border-emerald-400/30 hover:bg-black/30 disabled:opacity-60"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-medium">№{appeal.appealNumber}</span>
+                  <span className="text-xs text-emerald-300/90">{statusLabel(appeal.status)}</span>
+                </div>
+                <p className="mt-1 text-xs text-zinc-500">{formatDate(appeal.createdAt)}</p>
+                <p className="mt-2 text-sm text-zinc-300">{appeal.shortText}</p>
+                <p className="mt-2 text-xs text-emerald-300/80">Открыть чат →</p>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

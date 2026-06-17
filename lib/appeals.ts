@@ -740,10 +740,26 @@ export type CourierMiniAppProfile = {
 };
 
 export type CourierMiniAppAppeal = {
+  id: string;
   appealNumber: number;
   status: AppealStatus;
   createdAt: string;
   shortText: string;
+};
+
+export type CourierMiniAppMessage = {
+  id: string;
+  author: "courier" | "operator" | "bot" | "ai" | "system";
+  text: string;
+  photoUrl: string | null;
+  createdAt: string;
+};
+
+export type CourierMiniAppAppealDetail = CourierMiniAppAppeal & {
+  photoUrl: string | null;
+  resultText: string | null;
+  issueText: string;
+  messages: CourierMiniAppMessage[];
 };
 
 export type CourierMiniAppBootstrap = {
@@ -769,11 +785,136 @@ function toCourierMiniAppAppeal(appeal: Appeal): CourierMiniAppAppeal {
       .find((line) => line.startsWith("Проблема:"))
       ?.replace(/^Проблема:\s*/, "") ?? appeal.issueText;
   return {
+    id: appeal.id,
     appealNumber: appeal.appealNumber,
     status: appeal.status,
     createdAt: appeal.createdAt,
     shortText: shorten(oneLine(problemLine), 80),
   };
+}
+
+function toCourierMiniAppMessage(message: SupportMessage): CourierMiniAppMessage {
+  const author: CourierMiniAppMessage["author"] =
+    message.direction === "in"
+      ? "courier"
+      : message.direction === "operator"
+        ? "operator"
+        : message.direction === "ai"
+          ? "ai"
+          : message.direction === "system"
+            ? "system"
+            : "bot";
+  return {
+    id: message.id,
+    author,
+    text: message.text,
+    photoUrl: message.photoUrl,
+    createdAt: message.createdAt,
+  };
+}
+
+async function getCourierOwnedAppeal(maxUserId: string, appealId: string, phone?: string | null) {
+  await ensureAppealsSchema();
+  const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
+  const rows = await sql()`
+    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    FROM support_appeals a
+    LEFT JOIN LATERAL (
+      SELECT cp.*
+      FROM courier_profiles cp
+      WHERE
+        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+      LIMIT 1
+    ) cp ON TRUE
+    WHERE a.id = ${appealId}
+      AND a.merged_into_id IS NULL
+      AND (
+        a.max_user_id = ${maxUserId}
+        OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone})
+      )
+    LIMIT 1
+  `;
+  if (!rows[0]) return null;
+  const appeal = toAppeal(rows[0]);
+  await attachMessages([appeal]);
+  return appeal;
+}
+
+export async function listCourierMiniAppAppeals(
+  maxUserId: string,
+  phone?: string | null,
+  limit = 30,
+): Promise<CourierMiniAppAppeal[]> {
+  const appeals = await listCourierAppealsForBot(maxUserId, phone, limit);
+  return appeals.map(toCourierMiniAppAppeal);
+}
+
+export async function getCourierMiniAppAppealDetail(
+  maxUserId: string,
+  appealId: string,
+  phone?: string | null,
+): Promise<CourierMiniAppAppealDetail | null> {
+  const appeal = await getCourierOwnedAppeal(maxUserId, appealId, phone);
+  if (!appeal) return null;
+  return {
+    ...toCourierMiniAppAppeal(appeal),
+    photoUrl: appeal.photoUrl,
+    resultText: appeal.resultText,
+    issueText: appeal.issueText,
+    messages: appeal.messages.map(toCourierMiniAppMessage),
+  };
+}
+
+export async function addCourierMiniAppAppealMessage(input: {
+  maxUserId: string;
+  appealId: string;
+  chatId: string;
+  phone?: string | null;
+  text?: string;
+  photoUrl?: string | null;
+}) {
+  const appeal = await getCourierOwnedAppeal(input.maxUserId, input.appealId, input.phone);
+  if (!appeal) {
+    throw new Error("Обращение не найдено");
+  }
+
+  const text = input.text?.trim() ?? "";
+  const photoUrl = input.photoUrl ?? null;
+  if (!text && !photoUrl) {
+    throw new Error("Напишите сообщение или прикрепите фото");
+  }
+
+  const conversationKey =
+    appeal.maxChatId && appeal.maxUserId ? `${appeal.maxChatId}:${appeal.maxUserId}` : `${input.chatId}:${input.maxUserId}`;
+
+  await appendMessage({
+    appealId: appeal.id,
+    conversationKey,
+    direction: "in",
+    maxChatId: appeal.maxChatId ?? input.chatId,
+    maxUserId: input.maxUserId,
+    maxMessageId: null,
+    text: text || "[фото]",
+    photoUrl,
+  });
+
+  if (appeal.status === "closed") {
+    await sql()`
+      UPDATE support_appeals
+      SET status = 'open', closed_at = NULL, updated_at = now()
+      WHERE id = ${appeal.id}
+    `;
+  } else {
+    await sql()`
+      UPDATE support_appeals
+      SET updated_at = now()
+      WHERE id = ${appeal.id}
+    `;
+  }
+
+  return getCourierMiniAppAppealDetail(input.maxUserId, input.appealId, input.phone);
 }
 
 export async function getCourierMiniAppBootstrap(
@@ -788,7 +929,7 @@ export async function getCourierMiniAppBootstrap(
   const needsPhone = !profile.phone;
   const appeals = needsPhone
     ? []
-    : (await listCourierAppealsForBot(maxUserId, profile.phone, 5)).map(toCourierMiniAppAppeal);
+    : (await listCourierAppealsForBot(maxUserId, profile.phone, 30)).map(toCourierMiniAppAppeal);
   return {
     needsPhone,
     profile: toCourierMiniAppProfile(profile),
@@ -813,7 +954,7 @@ export async function bindCourierPhoneFromMiniApp(
     os: existing?.os,
     appVersion: existing?.appVersion,
   });
-  const appeals = (await listCourierAppealsForBot(maxUserId, profile.phone, 5)).map(toCourierMiniAppAppeal);
+  const appeals = (await listCourierAppealsForBot(maxUserId, profile.phone, 30)).map(toCourierMiniAppAppeal);
   return {
     needsPhone: false,
     profile: toCourierMiniAppProfile(profile),
@@ -994,8 +1135,9 @@ export async function listCourierAppealsForBot(
       ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
       LIMIT 1
     ) cp ON TRUE
-    WHERE a.max_user_id = ${maxUserId}
-       OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone})
+    WHERE (a.max_user_id = ${maxUserId}
+       OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone}))
+      AND a.merged_into_id IS NULL
     ORDER BY a.created_at DESC
     LIMIT ${limit}
   `;
