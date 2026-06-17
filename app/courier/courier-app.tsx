@@ -94,6 +94,33 @@ async function postJson<T>(url: string, initData: string, body: Record<string, u
   return data;
 }
 
+function waitForMaxBridge(timeoutMs = 12_000): Promise<MaxWebApp | null> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      const app = window.WebApp;
+      if (app?.initData) {
+        resolve(app);
+        return;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        resolve(app ?? null);
+        return;
+      }
+      window.setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+function signalMaxReady(app?: MaxWebApp) {
+  try {
+    app?.ready?.();
+  } catch {
+    // ignore bridge errors
+  }
+}
+
 export function CourierApp() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [initData, setInitData] = useState("");
@@ -119,20 +146,33 @@ export function CourierApp() {
   }, []);
 
   useEffect(() => {
-    const app = window.WebApp;
-    if (!app?.initData) {
-      setError("Откройте приложение через кнопку «Открыть» в чате с ботом MAX.");
-      setScreen("phone");
-      return;
-    }
+    let cancelled = false;
 
-    app.ready();
-    setInitData(app.initData);
+    void (async () => {
+      const app = await waitForMaxBridge();
+      if (cancelled) return;
 
-    loadSession(app.initData).catch((err) => {
-      setError(err instanceof Error ? err.message : "Не удалось загрузить данные");
-      setScreen("phone");
-    });
+      signalMaxReady(app ?? undefined);
+
+      if (!app?.initData) {
+        setError("Не удалось получить данные MAX. Закройте и откройте приложение кнопкой «Открыть».");
+        setScreen("phone");
+        return;
+      }
+
+      setInitData(app.initData);
+      try {
+        await loadSession(app.initData);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Не удалось загрузить данные");
+        setScreen("phone");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [loadSession]);
 
   const goHome = useCallback(() => {
