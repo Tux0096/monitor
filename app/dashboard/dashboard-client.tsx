@@ -21,6 +21,21 @@ type ApiErrorPayload = {
 
 const pageSize = 4;
 
+const MONTHS_RU = [
+  "янв",
+  "фев",
+  "мар",
+  "апр",
+  "май",
+  "июн",
+  "июл",
+  "авг",
+  "сен",
+  "окт",
+  "ноя",
+  "дек",
+];
+
 type AppealsAnalyticsResponse = {
   rows: AppealAnalyticsRow[];
   report: AppealsAnalyticsReport;
@@ -39,8 +54,6 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const [appealsExpanded, setAppealsExpanded] = useState(false);
   const [siteSelectedKey, setSiteSelectedKey] = useState<string | null>(null);
   const [mobileSelectedKey, setMobileSelectedKey] = useState<string | null>(null);
-  const [sitePage, setSitePage] = useState(1);
-  const [mobilePage, setMobilePage] = useState(1);
   const [monitorDateFrom, setMonitorDateFrom] = useState(() => defaultAppealsDateFrom());
   const [monitorDateTo, setMonitorDateTo] = useState(() => defaultAppealsDateTo());
   const [appealRows, setAppealRows] = useState<AppealAnalyticsRow[]>([]);
@@ -203,9 +216,7 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
               items={sitePages}
               selectedKey={selectedSite ? pageKey(selectedSite) : null}
               onSelect={setSiteSelectedKey}
-              page={sitePage}
               loading={loading && !report}
-              onPageChange={setSitePage}
             />
             {selectedSite ? (
               <MetricDetailPanel item={selectedSite} updatedAt={updatedAt} />
@@ -245,9 +256,7 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
               items={mobilePages}
               selectedKey={selectedMobile ? pageKey(selectedMobile) : null}
               onSelect={setMobileSelectedKey}
-              page={mobilePage}
               loading={loading && !report}
-              onPageChange={setMobilePage}
             />
             {selectedMobile ? (
               <MetricDetailPanel item={selectedMobile} updatedAt={updatedAt} />
@@ -467,55 +476,23 @@ function MonitoringMetricsGrid({
   items,
   selectedKey,
   onSelect,
-  page,
   loading,
-  onPageChange,
 }: {
   items: HistoryPageMetric[];
   selectedKey: string | null;
   onSelect: (key: string) => void;
-  page: number;
   loading: boolean;
-  onPageChange: (page: number) => void;
 }) {
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
-  const safePage = Math.min(page, totalPages);
-  const start = (safePage - 1) * pageSize;
-  const visibleItems = items.slice(start, start + pageSize);
-
   return (
     <div>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs uppercase tracking-wide text-zinc-500">Показатели</p>
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <button
-            type="button"
-            onClick={() => onPageChange(Math.max(1, safePage - 1))}
-            disabled={safePage === 1 || loading}
-            className="rounded-md border border-zinc-800 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            назад
-          </button>
-          <span>
-            {safePage}/{totalPages}
-          </span>
-          <button
-            type="button"
-            onClick={() => onPageChange(Math.min(totalPages, safePage + 1))}
-            disabled={safePage === totalPages || loading}
-            className="rounded-md border border-zinc-800 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            вперёд
-          </button>
-        </div>
-      </div>
-      <div className="mt-4 flex flex-wrap gap-4">
+      <p className="text-xs uppercase tracking-wide text-zinc-500">Показатели</p>
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {loading ? (
           Array.from({ length: pageSize }, (_, idx) => <DataTileSkeleton key={`skeleton-${idx}`} />)
         ) : items.length === 0 ? (
           <EmptyHint text="данные готовятся" />
         ) : (
-          visibleItems.map((item) => (
+          items.map((item) => (
             <DataTile
               key={pageKey(item)}
               item={item}
@@ -675,7 +652,7 @@ function DataTile({
     <button
       type="button"
       onClick={onClick}
-      className={`h-24 w-28 rounded-lg border p-2 text-left transition ${
+      className={`h-24 w-full rounded-lg border p-2 text-left transition ${
         selected
           ? "border-emerald-400 bg-emerald-400/20"
           : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
@@ -763,8 +740,12 @@ function PerformanceChart({ points }: { points: HistoryChartPoint[] }) {
   const padding = { top: 24, right: 24, bottom: 38, left: 54 };
   const min = 0;
   const max = Math.max(800, ...points.map((point) => point.valueMs ?? 0));
+  const span = width - padding.left - padding.right;
   const x = (idx: number) =>
-    padding.left + (idx * (width - padding.left - padding.right)) / (points.length - 1);
+    points.length <= 1
+      ? padding.left + span / 2
+      : padding.left + (idx * span) / (points.length - 1);
+  const labelStep = Math.max(1, Math.ceil(points.length / 12));
   const y = (value: number) =>
     padding.top + ((max - value) * (height - padding.top - padding.bottom)) / (max - min);
   const currentPath = makePath(
@@ -796,22 +777,43 @@ function PerformanceChart({ points }: { points: HistoryChartPoint[] }) {
         {currentPath ? (
           <path d={currentPath} fill="none" stroke="#6d7dfc" strokeWidth="3" />
         ) : null}
-        {points.map((point, idx) => (
-          <g key={point.dayIndex}>
-            {point.valueMs == null ? null : (
-              <circle cx={x(idx)} cy={y(point.valueMs)} r="3.5" fill="#6d7dfc" />
-            )}
-            <text
-              x={x(idx)}
-              y={height - 10}
-              textAnchor="middle"
-              fill="rgb(113 113 122)"
-              fontSize="12"
-            >
-              {point.label}
-            </text>
-          </g>
-        ))}
+        {points.map((point, idx) => {
+          const date = new Date(point.date);
+          const month = date.getUTCMonth();
+          const showDay = idx % labelStep === 0 || idx === points.length - 1;
+          const isMonthStart =
+            idx === 0 || new Date(points[idx - 1]?.date ?? point.date).getUTCMonth() !== month;
+          return (
+            <g key={point.dayIndex}>
+              {point.valueMs == null ? null : (
+                <circle cx={x(idx)} cy={y(point.valueMs)} r="3.5" fill="#6d7dfc" />
+              )}
+              {showDay ? (
+                <text
+                  x={x(idx)}
+                  y={height - 20}
+                  textAnchor="middle"
+                  fill="rgb(113 113 122)"
+                  fontSize="11"
+                >
+                  {date.getUTCDate()}
+                </text>
+              ) : null}
+              {isMonthStart ? (
+                <text
+                  x={x(idx)}
+                  y={height - 5}
+                  textAnchor="middle"
+                  fill="rgb(161 161 170)"
+                  fontSize="11"
+                  fontWeight="600"
+                >
+                  {MONTHS_RU[month]}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
       </svg>
     </div>
   );

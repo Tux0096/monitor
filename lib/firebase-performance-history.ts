@@ -55,6 +55,7 @@ export type StoredPerformanceMetric = {
 export type HistoryChartPoint = {
   dayIndex: number;
   label: string;
+  date: string;
   valueMs: number | null;
 };
 
@@ -562,22 +563,23 @@ export async function importSyntheticProbes(): Promise<{
         status: result.lastStatus,
       });
       if (result.samples === 0) continue;
+      // Две метрики на цель: ответ сервера на запрос (TTFB) и полная загрузка.
       await upsertProbeRow({
-        metricName: target.name,
-        sourceType,
-        app,
-        page: target.url,
-        day,
-        avgMs: result.totalMs,
-        samples: result.samples,
-      });
-      await upsertProbeRow({
-        metricName: `${target.name} · ответ сервера`,
+        metricName: `${target.name} — ответ на запрос`,
         sourceType,
         app,
         page: target.url,
         day,
         avgMs: result.ttfbMs,
+        samples: result.samples,
+      });
+      await upsertProbeRow({
+        metricName: `${target.name} — полная загрузка`,
+        sourceType,
+        app,
+        page: target.url,
+        day,
+        avgMs: result.totalMs,
         samples: result.samples,
       });
       stored += 1;
@@ -734,6 +736,7 @@ function buildChart(
         month: "short",
         day: "numeric",
       }),
+      date: toDateString(bucketStart),
       valueMs: weightedAverage(bucketRows),
     };
   });

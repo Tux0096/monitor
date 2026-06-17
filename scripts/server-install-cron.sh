@@ -12,8 +12,8 @@ if [ -z "${SECRET}" ]; then
 fi
 
 LINE="15 3 * * * curl -fsS -X POST -H \"x-monitor-import-secret: ${SECRET}\" \"http://127.0.0.1:${PORT}/api/firebase/performance/import\" >> /opt/monitor/import.log 2>&1"
-# Синтетический мониторинг сайта и МП — каждый час (живые замеры времени отклика)
-PROBE_LINE="5 * * * * curl -fsS -X POST -H \"x-monitor-import-secret: ${SECRET}\" \"http://127.0.0.1:${PORT}/api/monitoring/probe\" >> /opt/monitor/probe.log 2>&1"
+# Синтетический мониторинг сайта и МП — каждые 10 минут (живые замеры времени отклика)
+PROBE_LINE="*/10 * * * * curl -fsS -X POST -H \"x-monitor-import-secret: ${SECRET}\" \"http://127.0.0.1:${PORT}/api/monitoring/probe\" >> /opt/monitor/probe.log 2>&1"
 
 TMP=$(mktemp)
 crontab -l 2>/dev/null \
