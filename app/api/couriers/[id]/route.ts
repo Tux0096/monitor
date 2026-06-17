@@ -44,6 +44,7 @@ export async function PATCH(
     appVersion?: string;
     notes?: string;
     tags?: string[];
+    pointId?: string | null;
   };
 
   const courier = await updateCourierProfile(existing.maxUserId, {
@@ -55,6 +56,7 @@ export async function PATCH(
     appVersion: emptyToNull(body.appVersion),
     notes: emptyToNull(body.notes),
     tags: body.tags?.filter(Boolean),
+    pointId: body.pointId !== undefined ? body.pointId || null : undefined,
   });
 
   return Response.json({ courier });

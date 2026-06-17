@@ -1,6 +1,7 @@
 "use client";
 
 import type { CourierProfile } from "@/lib/appeals";
+import type { DeliveryPoint } from "@/lib/points";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -14,6 +15,7 @@ type CourierDraft = Pick<
   "displayName" | "lastName" | "phone" | "phoneModel" | "os" | "appVersion" | "notes"
 > & {
   tagsText: string;
+  pointId: string;
 };
 
 export function CouriersClient() {
@@ -24,12 +26,22 @@ export function CouriersClient() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, CourierDraft>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [points, setPoints] = useState<DeliveryPoint[]>([]);
 
   useEffect(() => {
     const initial = searchParams.get("search") ?? "";
     setSearch(initial);
     void loadCouriers(initial);
   }, [searchParams]);
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch("/api/points", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = (await response.json()) as { points: DeliveryPoint[] };
+      setPoints(data.points.filter((point) => point.isActive));
+    })();
+  }, []);
 
   async function loadCouriers(query = search) {
     setLoading(true);
@@ -71,6 +83,7 @@ export function CouriersClient() {
             .split(",")
             .map((tag) => tag.trim())
             .filter(Boolean),
+          pointId: draft.pointId || null,
         }),
       });
       if (response.ok) await loadCouriers();
@@ -156,6 +169,11 @@ export function CouriersClient() {
                         <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
                           {courier.totalAppeals} обращ.
                         </span>
+                        {courier.pointName ? (
+                          <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-200">
+                            {courier.pointName}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-1 truncate text-xs text-zinc-500">
                         {draft.phoneModel || draft.os || draft.appVersion
@@ -177,6 +195,7 @@ export function CouriersClient() {
                     <div className="border-t border-zinc-800 p-4">
                       <CourierFullCard
                         courier={courier}
+                        points={points}
                         draft={draft}
                         saving={savingId === courier.id}
                         onChange={(next) =>
@@ -198,12 +217,14 @@ export function CouriersClient() {
 
 function CourierFullCard({
   courier,
+  points,
   draft,
   saving,
   onChange,
   onSave,
 }: {
   courier: CourierProfile;
+  points: DeliveryPoint[];
   draft: CourierDraft;
   saving: boolean;
   onChange: (draft: CourierDraft) => void;
@@ -244,6 +265,21 @@ function CourierFullCard({
             value={draft.appVersion ?? ""}
             onChange={(appVersion) => onChange({ ...draft, appVersion })}
           />
+          <label className="text-xs text-zinc-500">
+            Точка
+            <select
+              value={draft.pointId}
+              onChange={(event) => onChange({ ...draft, pointId: event.target.value })}
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+            >
+              <option value="">Не выбрана</option>
+              {points.map((point) => (
+                <option key={point.id} value={point.id}>
+                  {point.city ? `${point.name} · ${point.city}` : point.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <Field
             label="Теги"
             value={draft.tagsText}
@@ -281,6 +317,7 @@ function CourierFullCard({
         <div className="text-xs uppercase tracking-wide text-zinc-500">Сводка</div>
         <dl className="mt-3 space-y-3 text-sm">
           <InfoRow label="MAX ID" value={courier.maxUserId} />
+          <InfoRow label="Точка" value={courier.pointName ?? "—"} />
           <InfoRow label="Обращений" value={String(courier.totalAppeals)} />
           <InfoRow
             label="Последнее обращение"
@@ -364,5 +401,6 @@ function toDraft(courier: CourierProfile): CourierDraft {
     appVersion: courier.appVersion ?? "",
     notes: courier.notes ?? "",
     tagsText: courier.tags.join(", "),
+    pointId: courier.pointId ?? "",
   };
 }

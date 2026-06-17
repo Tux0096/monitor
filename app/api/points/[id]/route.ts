@@ -1,5 +1,5 @@
 import { auth } from "@/auth";
-import { updateAppealByOperator, type AppealStatus } from "@/lib/appeals";
+import { updateDeliveryPoint } from "@/lib/points";
 
 export const runtime = "nodejs";
 
@@ -13,20 +13,19 @@ export async function PATCH(
   }
 
   const body = (await request.json().catch(() => ({}))) as {
-    issueText?: string;
-    resultText?: string;
-    operatorReply?: string;
-    status?: AppealStatus;
-    pointId?: string | null;
+    name?: string;
+    city?: string;
+    notes?: string;
+    isActive?: boolean;
   };
 
   const { id } = await params;
   try {
-    const appeal = await updateAppealByOperator(id, body);
-    if (!appeal) {
+    const point = await updateDeliveryPoint(id, body);
+    if (!point) {
       return Response.json({ error: "Not found" }, { status: 404 });
     }
-    return Response.json({ appeal });
+    return Response.json({ point });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Не удалось сохранить" },

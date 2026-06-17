@@ -1,6 +1,7 @@
 "use client";
 
 import type { Appeal, CourierProfile } from "@/lib/appeals";
+import type { DeliveryPoint } from "@/lib/points";
 import {
   appealNeedsManualClassification,
   getCategoryLabel,
@@ -21,12 +22,14 @@ type CourierDraft = Pick<
   "displayName" | "lastName" | "phone" | "phoneModel" | "os" | "appVersion" | "notes"
 > & {
   tagsText: string;
+  pointId: string;
 };
 
 type AppealDraft = {
   issueText: string;
   resultText: string;
   operatorReply: string;
+  pointId: string;
 };
 
 type MergeCandidate = {
@@ -58,11 +61,21 @@ export function AppealsClient() {
   const [statusFilter, setStatusFilter] = useState<"all" | "open" | "closed">("all");
   const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
   const categoryMenuRef = useRef<HTMLDivElement>(null);
+  const [points, setPoints] = useState<DeliveryPoint[]>([]);
 
   useEffect(() => {
     void loadAppeals();
     const interval = window.setInterval(() => void loadAppeals({ silent: true }), 15_000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch("/api/points", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = (await response.json()) as { points: DeliveryPoint[] };
+      setPoints(data.points.filter((point) => point.isActive));
+    })();
   }, []);
 
   useEffect(() => {
@@ -165,6 +178,7 @@ export function AppealsClient() {
         issueText: draft.issueText,
         resultText: draft.resultText,
         operatorReply: draft.operatorReply,
+        pointId: draft.pointId || null,
         status: options?.status,
       }),
     });
@@ -235,6 +249,7 @@ export function AppealsClient() {
         appVersion: draft.appVersion,
         notes: draft.notes,
         tags: draft.tagsText.split(",").map((tag) => tag.trim()).filter(Boolean),
+        pointId: draft.pointId || null,
       }),
     });
     if (response.ok) await loadAppeals();
@@ -467,6 +482,11 @@ export function AppealsClient() {
                             контур · {appeal.mergedAppeals.length + 1}
                           </span>
                         ) : null}
+                        {appeal.pointName ? (
+                          <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-200">
+                            {appeal.pointName}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-1 truncate text-xs text-zinc-500">
                         {new Date(appeal.createdAt).toLocaleString("ru-RU")}
@@ -493,6 +513,7 @@ export function AppealsClient() {
                         <div>
                           <AppealEditor
                             appeal={appeal}
+                            points={points}
                             draft={appealDrafts[appeal.id] ?? toAppealDraft(appeal)}
                             onChange={(draft) =>
                               setAppealDrafts((current) => ({ ...current, [appeal.id]: draft }))
@@ -540,6 +561,7 @@ export function AppealsClient() {
 
                         <CourierCard
                           appeal={appeal}
+                          points={points}
                           draft={courierDrafts[appeal.id] ?? toCourierDraft(appeal)}
                           onChange={(draft) =>
                             setCourierDrafts((current) => ({ ...current, [appeal.id]: draft }))
@@ -761,12 +783,14 @@ function StatusBadge({ appeal }: { appeal: Appeal }) {
 
 function AppealEditor({
   appeal,
+  points,
   draft,
   onChange,
   onSave,
   onReopen,
 }: {
   appeal: Appeal;
+  points: DeliveryPoint[];
   draft: AppealDraft;
   onChange: (draft: AppealDraft) => void;
   onSave: (options?: { status?: "open" | "closed" }) => void;
@@ -787,6 +811,13 @@ function AppealEditor({
           <span className="text-xs text-zinc-500">Закрытое обращение</span>
         ) : null}
       </div>
+
+      <PointSelect
+        label="Точка обращения"
+        points={points}
+        value={draft.pointId}
+        onChange={(pointId) => onChange({ ...draft, pointId })}
+      />
 
       <label className="mt-3 block text-xs text-zinc-500">
         Описание / данные обращения
@@ -1176,11 +1207,13 @@ function MessageHistory({ appeal }: { appeal: Appeal }) {
 
 function CourierCard({
   appeal,
+  points,
   draft,
   onChange,
   onSave,
 }: {
   appeal: Appeal;
+  points: DeliveryPoint[];
   draft: CourierDraft;
   onChange: (draft: CourierDraft) => void;
   onSave: () => void;
@@ -1202,6 +1235,12 @@ function CourierCard({
         <Field label="Модель телефона" value={draft.phoneModel ?? ""} onChange={(phoneModel) => onChange({ ...draft, phoneModel })} />
         <Field label="ОС" value={draft.os ?? ""} onChange={(os) => onChange({ ...draft, os })} />
         <Field label="Версия приложения" value={draft.appVersion ?? ""} onChange={(appVersion) => onChange({ ...draft, appVersion })} />
+        <PointSelect
+          label="Точка курьера"
+          points={points}
+          value={draft.pointId}
+          onChange={(pointId) => onChange({ ...draft, pointId })}
+        />
         <Field label="Теги" value={draft.tagsText} onChange={(tagsText) => onChange({ ...draft, tagsText })} />
         <label className="text-xs text-zinc-500">
           Пометки
@@ -1218,6 +1257,44 @@ function CourierCard({
         Сохранить карточку
       </button>
     </aside>
+  );
+}
+
+function PointSelect({
+  label,
+  points,
+  value,
+  onChange,
+}: {
+  label: string;
+  points: DeliveryPoint[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block text-xs text-zinc-500">
+      {label}
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+      >
+        <option value="">Не выбрана</option>
+        {points.map((point) => (
+          <option key={point.id} value={point.id}>
+            {point.city ? `${point.name} · ${point.city}` : point.name}
+          </option>
+        ))}
+      </select>
+      {points.length === 0 ? (
+        <span className="mt-1 block text-[11px] text-zinc-600">
+          <Link href="/dashboard/points" className="text-sky-400 hover:text-sky-300">
+            Создайте точки
+          </Link>{" "}
+          во вкладке слева
+        </span>
+      ) : null}
+    </label>
   );
 }
 
@@ -1413,6 +1490,7 @@ function toAppealDraft(appeal: Appeal): AppealDraft {
     issueText: appeal.issueText,
     resultText: appeal.resultText ?? appeal.aiSuggestedReply ?? appeal.operatorReply ?? "",
     operatorReply: appeal.operatorReply ?? appeal.aiSuggestedReply ?? "",
+    pointId: appeal.pointId ?? "",
   };
 }
 
@@ -1427,5 +1505,6 @@ function toCourierDraft(appeal: Appeal): CourierDraft {
     appVersion: profile?.appVersion ?? appeal.appVersion ?? "",
     notes: profile?.notes ?? "",
     tagsText: profile?.tags?.join(", ") ?? "",
+    pointId: profile?.pointId ?? "",
   };
 }

@@ -35,6 +35,8 @@ export type CourierProfile = {
   appVersion: string | null;
   notes: string | null;
   tags: string[];
+  pointId: string | null;
+  pointName: string | null;
   totalAppeals: number;
   lastAppealAt: string | null;
   updatedAt: string;
@@ -79,6 +81,8 @@ export type Appeal = {
   operatorReply: string | null;
   duplicateOf: number | null;
   mergedIntoId: string | null;
+  pointId: string | null;
+  pointName: string | null;
   resultText: string | null;
   createdAt: string;
   updatedAt: string;
@@ -258,6 +262,7 @@ async function migrateAppealsSchema() {
     ["merged_into_id", "uuid"],
     ["courier_last_read_at", "timestamptz"],
     ["operator_last_read_at", "timestamptz"],
+    ["point_id", "uuid"],
   ]);
   await addColumns("courier_profiles", [
     ["display_name", "text"],
@@ -271,7 +276,23 @@ async function migrateAppealsSchema() {
     ["total_appeals", "integer NOT NULL DEFAULT 0"],
     ["last_appeal_at", "timestamptz"],
     ["updated_at", "timestamptz NOT NULL DEFAULT now()"],
+    ["point_id", "uuid"],
   ]);
+  await sql()`
+    CREATE TABLE IF NOT EXISTS delivery_points (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      name text NOT NULL,
+      city text,
+      notes text,
+      is_active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+  await sql()`
+    CREATE INDEX IF NOT EXISTS delivery_points_name_idx
+    ON delivery_points (name)
+  `;
   await sql()`
     CREATE TABLE IF NOT EXISTS support_messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -487,6 +508,7 @@ export async function updateAppealByOperator(
     issueText?: string;
     resultText?: string;
     operatorReply?: string;
+    pointId?: string | null;
     status?: AppealStatus;
   },
 ): Promise<Appeal | null> {
@@ -530,12 +552,14 @@ export async function updateAppealByOperator(
     resultText !== undefined ? resultText || null : appeal.resultText;
   const nextOperatorReply =
     operatorReply !== undefined ? operatorReply || null : appeal.operatorReply;
+  const nextPointId = input.pointId !== undefined ? input.pointId : appeal.pointId;
 
   await sql()`
     UPDATE support_appeals
     SET issue_text = ${nextIssueText},
         result_text = ${nextResultText},
         operator_reply = ${nextOperatorReply},
+        point_id = ${nextPointId},
         status = ${nextStatus},
         classification = ${classification},
         category = ${category},
@@ -761,20 +785,22 @@ export async function listCourierProfiles(search?: string): Promise<CourierProfi
   const query = search?.trim();
   const rows = query
     ? await sql()`
-        SELECT *
-        FROM courier_profiles
+        SELECT cp.*, dp.name AS point_name
+        FROM courier_profiles cp
+        LEFT JOIN delivery_points dp ON dp.id = cp.point_id
         WHERE
-          coalesce(last_name, '') ILIKE ${`%${query}%`}
-          OR coalesce(display_name, '') ILIKE ${`%${query}%`}
-          OR coalesce(phone, '') ILIKE ${`%${query}%`}
-          OR max_user_id ILIKE ${`%${query}%`}
-        ORDER BY coalesce(last_appeal_at, updated_at) DESC
+          coalesce(cp.last_name, '') ILIKE ${`%${query}%`}
+          OR coalesce(cp.display_name, '') ILIKE ${`%${query}%`}
+          OR coalesce(cp.phone, '') ILIKE ${`%${query}%`}
+          OR cp.max_user_id ILIKE ${`%${query}%`}
+        ORDER BY coalesce(cp.last_appeal_at, cp.updated_at) DESC
         LIMIT 300
       `
     : await sql()`
-        SELECT *
-        FROM courier_profiles
-        ORDER BY coalesce(last_appeal_at, updated_at) DESC
+        SELECT cp.*, dp.name AS point_name
+        FROM courier_profiles cp
+        LEFT JOIN delivery_points dp ON dp.id = cp.point_id
+        ORDER BY coalesce(cp.last_appeal_at, cp.updated_at) DESC
         LIMIT 300
       `;
   return rows.map(toCourierProfile);
@@ -783,9 +809,10 @@ export async function listCourierProfiles(search?: string): Promise<CourierProfi
 export async function getCourierProfile(id: string): Promise<CourierProfile | null> {
   await ensureAppealsSchema();
   const rows = await sql()`
-    SELECT *
-    FROM courier_profiles
-    WHERE id = ${id} OR max_user_id = ${id}
+    SELECT cp.*, dp.name AS point_name
+    FROM courier_profiles cp
+    LEFT JOIN delivery_points dp ON dp.id = cp.point_id
+    WHERE cp.id = ${id} OR cp.max_user_id = ${id}
     LIMIT 1
   `;
   return rows[0] ? toCourierProfile(rows[0]) : null;
@@ -799,9 +826,10 @@ export async function getCourierProfileByMaxOrPhone(
   await syncCourierProfilesFromAppeals();
   const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
   const rows = await sql()`
-    SELECT *
-    FROM courier_profiles
-    WHERE max_user_id = ${maxUserId}
+    SELECT cp.*, dp.name AS point_name
+    FROM courier_profiles cp
+    LEFT JOIN delivery_points dp ON dp.id = cp.point_id
+    WHERE cp.max_user_id = ${maxUserId}
        OR (${normalizedPhone}::text IS NOT NULL AND phone = ${normalizedPhone})
     ORDER BY CASE WHEN max_user_id = ${maxUserId} THEN 0 ELSE 1 END
     LIMIT 1
@@ -956,17 +984,22 @@ async function getCourierAppealById(maxUserId: string, appealId: string, phone?:
   await ensureAppealsSchema();
   const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
   const rows = await sql()`
-    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    SELECT a.*, ap.name AS appeal_point_name,
+      (
+        SELECT row_to_json(enriched)
+        FROM (
+          SELECT cp.*, cdp.name AS point_name
+          FROM courier_profiles cp
+          LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+          WHERE
+            (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+            OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+          ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) enriched
+      ) AS courier_profile
     FROM support_appeals a
-    LEFT JOIN LATERAL (
-      SELECT cp.*
-      FROM courier_profiles cp
-      WHERE
-        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-      LIMIT 1
-    ) cp ON TRUE
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.id = ${appealId}
       AND (
         a.max_user_id = ${maxUserId}
@@ -1196,6 +1229,8 @@ export async function createCourierAppealFromMiniApp(input: {
     os: draft.os ?? profile.os,
     appVersion: draft.appVersion ?? profile.appVersion,
   });
+  const savedProfile =
+    (await getCourierProfileByMaxOrPhone(input.maxUserId, draft.phone ?? profile.phone)) ?? profile;
 
   const suggestion = await suggestSupportReply({
     description,
@@ -1219,7 +1254,7 @@ export async function createCourierAppealFromMiniApp(input: {
       courier_last_name, phone, phone_model, os, app_version, photo_url,
       photo_analysis, description_normalized, category, classification, subcategory, priority,
       confidence, classification_source, order_number, issue_text, ai_summary, ai_suggested_reply,
-      operator_reply, result_text
+      operator_reply, result_text, point_id
     )
     VALUES (
       'max', ${autoResolved ? "closed" : "open"}, ${input.chatId}, ${input.maxUserId}, null,
@@ -1231,7 +1266,8 @@ export async function createCourierAppealFromMiniApp(input: {
       ${classification.confidence}, 'auto', ${extractOrderNumber(description)}, ${formatIssueText(draft, classification)},
       ${suggestion.summary}, ${suggestion.suggestedReply},
       ${autoResolved ? suggestion.suggestedReply : null},
-      ${autoResolved ? suggestion.suggestedReply : null}
+      ${autoResolved ? suggestion.suggestedReply : null},
+      ${savedProfile.pointId ?? null}
     )
     RETURNING id, appeal_number
   `;
@@ -1304,17 +1340,22 @@ export async function listCourierAppealsForBot(
   await ensureAppealsSchema();
   const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
   const rows = await sql()`
-    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    SELECT a.*, ap.name AS appeal_point_name,
+      (
+        SELECT row_to_json(enriched)
+        FROM (
+          SELECT cp.*, cdp.name AS point_name
+          FROM courier_profiles cp
+          LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+          WHERE
+            (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+            OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+          ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) enriched
+      ) AS courier_profile
     FROM support_appeals a
-    LEFT JOIN LATERAL (
-      SELECT cp.*
-      FROM courier_profiles cp
-      WHERE
-        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-      LIMIT 1
-    ) cp ON TRUE
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE (a.max_user_id = ${maxUserId}
        OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone}))
       AND a.merged_into_id IS NULL
@@ -1331,34 +1372,44 @@ export async function listAppeals(status?: string): Promise<Appeal[]> {
   const rows =
     status && status !== "all"
       ? await sql()`
-          SELECT a.*, row_to_json(cp.*) AS courier_profile
+          SELECT a.*, ap.name AS appeal_point_name,
+            (
+              SELECT row_to_json(enriched)
+              FROM (
+                SELECT cp.*, cdp.name AS point_name
+                FROM courier_profiles cp
+                LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+                WHERE
+                  (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+                  OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+                ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+                LIMIT 1
+              ) enriched
+            ) AS courier_profile
           FROM support_appeals a
-          LEFT JOIN LATERAL (
-            SELECT cp.*
-            FROM courier_profiles cp
-            WHERE
-              (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-              OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-            ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-            LIMIT 1
-          ) cp ON TRUE
+          LEFT JOIN delivery_points ap ON ap.id = a.point_id
           WHERE a.status = ${status}
             AND a.merged_into_id IS NULL
           ORDER BY a.created_at DESC
           LIMIT 200
         `
       : await sql()`
-          SELECT a.*, row_to_json(cp.*) AS courier_profile
+          SELECT a.*, ap.name AS appeal_point_name,
+            (
+              SELECT row_to_json(enriched)
+              FROM (
+                SELECT cp.*, cdp.name AS point_name
+                FROM courier_profiles cp
+                LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+                WHERE
+                  (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+                  OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+                ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+                LIMIT 1
+              ) enriched
+            ) AS courier_profile
           FROM support_appeals a
-          LEFT JOIN LATERAL (
-            SELECT cp.*
-            FROM courier_profiles cp
-            WHERE
-              (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-              OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-            ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-            LIMIT 1
-          ) cp ON TRUE
+          LEFT JOIN delivery_points ap ON ap.id = a.point_id
           WHERE a.merged_into_id IS NULL
           ORDER BY a.created_at DESC
           LIMIT 200
@@ -1373,17 +1424,22 @@ export async function listAppeals(status?: string): Promise<Appeal[]> {
 export async function getAppeal(id: string): Promise<Appeal | null> {
   await ensureAppealsSchema();
   const rows = await sql()`
-    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    SELECT a.*, ap.name AS appeal_point_name,
+      (
+        SELECT row_to_json(enriched)
+        FROM (
+          SELECT cp.*, cdp.name AS point_name
+          FROM courier_profiles cp
+          LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+          WHERE
+            (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+            OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+          ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) enriched
+      ) AS courier_profile
     FROM support_appeals a
-    LEFT JOIN LATERAL (
-      SELECT cp.*
-      FROM courier_profiles cp
-      WHERE
-        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-      LIMIT 1
-    ) cp ON TRUE
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.id = ${id}
     LIMIT 1
   `;
@@ -1400,17 +1456,22 @@ async function attachMergedAppeals(appeals: Appeal[]) {
   if (ids.length === 0) return;
 
   const rows = await sql()`
-    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    SELECT a.*, ap.name AS appeal_point_name,
+      (
+        SELECT row_to_json(enriched)
+        FROM (
+          SELECT cp.*, cdp.name AS point_name
+          FROM courier_profiles cp
+          LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+          WHERE
+            (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+            OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+          ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) enriched
+      ) AS courier_profile
     FROM support_appeals a
-    LEFT JOIN LATERAL (
-      SELECT cp.*
-      FROM courier_profiles cp
-      WHERE
-        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-      LIMIT 1
-    ) cp ON TRUE
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.merged_into_id = ANY(${ids})
     ORDER BY a.created_at ASC
   `;
@@ -1506,6 +1567,7 @@ export async function updateCourierProfile(
       | "appVersion"
       | "notes"
       | "tags"
+      | "pointId"
     >
   >,
 ) {
@@ -1521,6 +1583,7 @@ export async function updateCourierProfile(
       app_version,
       notes,
       tags,
+      point_id,
       updated_at
     )
     VALUES (
@@ -1533,6 +1596,7 @@ export async function updateCourierProfile(
       ${input.appVersion ?? null},
       ${input.notes ?? null},
       ${input.tags ?? []},
+      ${input.pointId !== undefined ? input.pointId : null},
       now()
     )
     ON CONFLICT (max_user_id) DO UPDATE
@@ -1544,10 +1608,21 @@ export async function updateCourierProfile(
         app_version = COALESCE(EXCLUDED.app_version, courier_profiles.app_version),
         notes = COALESCE(EXCLUDED.notes, courier_profiles.notes),
         tags = CASE WHEN cardinality(EXCLUDED.tags) > 0 THEN EXCLUDED.tags ELSE courier_profiles.tags END,
+        point_id = CASE
+          WHEN ${input.pointId !== undefined} THEN EXCLUDED.point_id
+          ELSE courier_profiles.point_id
+        END,
         updated_at = now()
     RETURNING *
   `;
-  return toCourierProfile(rows[0]);
+  const profile = toCourierProfile(rows[0]);
+  if (profile.pointId) {
+    const pointRows = await sql()`
+      SELECT name FROM delivery_points WHERE id = ${profile.pointId} LIMIT 1
+    `;
+    profile.pointName = pointRows[0]?.name ? String(pointRows[0].name) : null;
+  }
+  return profile;
 }
 
 export async function suggestReplyForAppeal(id: string) {
@@ -1889,6 +1964,8 @@ async function advanceDialog(
     os: draft.os ?? profile.os,
     appVersion: draft.appVersion ?? profile.appVersion,
   });
+  const savedProfile =
+    (await getCourierProfileByMaxOrPhone(input.userId!, draft.phone ?? profile.phone)) ?? profile;
   const suggestion = await suggestSupportReply({
     description,
     classification,
@@ -1909,7 +1986,7 @@ async function advanceDialog(
       courier_last_name, phone, phone_model, os, app_version, photo_url,
       photo_analysis, description_normalized, category, classification, subcategory, priority,
       confidence, classification_source, order_number, issue_text, ai_summary, ai_suggested_reply,
-      operator_reply, result_text
+      operator_reply, result_text, point_id
     )
     VALUES (
       'max', ${autoResolved ? "closed" : "open"}, ${input.chatId}, ${input.userId}, ${draft.messageId ?? input.messageId},
@@ -1921,7 +1998,8 @@ async function advanceDialog(
       ${classification.confidence}, 'auto', ${extractOrderNumber(description)}, ${formatIssueText(draft, classification)},
       ${suggestion.summary}, ${suggestion.suggestedReply},
       ${autoResolved ? suggestion.suggestedReply : null},
-      ${autoResolved ? suggestion.suggestedReply : null}
+      ${autoResolved ? suggestion.suggestedReply : null},
+      ${savedProfile.pointId ?? null}
     )
     RETURNING id, appeal_number
   `;
@@ -2375,6 +2453,8 @@ function toAppeal(row: postgres.Row): Appeal {
     operatorReply: nullableString(row.operator_reply),
     duplicateOf: row.duplicate_of == null ? null : Number(row.duplicate_of),
     mergedIntoId: nullableString(row.merged_into_id),
+    pointId: nullableString(row.point_id),
+    pointName: nullableString(row.appeal_point_name),
     resultText: nullableString(row.result_text),
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
@@ -2404,6 +2484,8 @@ function toCourierProfile(row: postgres.Row): CourierProfile {
     appVersion: nullableString(row.app_version),
     notes: nullableString(row.notes),
     tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
+    pointId: nullableString(row.point_id),
+    pointName: nullableString(row.point_name),
     totalAppeals: Number(row.total_appeals ?? 0),
     lastAppealAt: row.last_appeal_at ? new Date(row.last_appeal_at as string).toISOString() : null,
     updatedAt: new Date(row.updated_at as string).toISOString(),
