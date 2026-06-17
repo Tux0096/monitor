@@ -486,12 +486,15 @@ function parseProbeTargets(envKey: string, fallback: ProbeTarget[]): ProbeTarget
                   ),
                 )
               : undefined;
-          const requireOk = obj.requireOk === true;
-          if (url) return { name, url, headers, requireOk: requireOk || undefined };
+          if (!url) return null;
+          const target: ProbeTarget = { name, url };
+          if (headers && Object.keys(headers).length > 0) target.headers = headers;
+          if (requireOk) target.requireOk = true;
+          return target;
         }
         return null;
       })
-      .filter((item): item is ProbeTarget => Boolean(item));
+      .filter((item): item is ProbeTarget => item != null);
     return targets.length > 0 ? targets : fallback;
   } catch {
     return fallback;
