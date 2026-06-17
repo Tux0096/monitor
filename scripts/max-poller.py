@@ -92,7 +92,11 @@ def write_marker(marker: int) -> None:
 
 
 def fetch_updates(token: str, marker: int | None, timeout: int = 25) -> dict:
-    params = {"timeout": str(timeout), "limit": "50", "types": "message_created"}
+    params = {
+        "timeout": str(timeout),
+        "limit": "50",
+        "types": "message_created,bot_started,message_callback",
+    }
     if marker is not None:
         params["marker"] = str(marker)
     url = f"{API_BASE}/updates?{urllib.parse.urlencode(params)}"

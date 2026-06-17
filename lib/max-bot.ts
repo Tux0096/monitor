@@ -2,7 +2,28 @@ import { getRuntimeEnv } from "@/lib/runtime-env";
 
 const maxApiBase = "https://platform-api.max.ru";
 
-export async function sendMaxMessage(chatId: string, text: string) {
+export type MaxInlineKeyboardButton =
+  | {
+      type: "message";
+      text: string;
+    }
+  | {
+      type: "request_contact";
+      text: string;
+    }
+  | {
+      type: "link";
+      text: string;
+      url: string;
+    };
+
+export type MaxInlineKeyboard = MaxInlineKeyboardButton[][];
+
+export async function sendMaxMessage(
+  chatId: string,
+  text: string,
+  keyboard?: MaxInlineKeyboard,
+) {
   const token = getRuntimeEnv("MAX_BOT_TOKEN");
   if (!token) {
     throw new Error("MAX_BOT_TOKEN is not configured");
@@ -20,6 +41,16 @@ export async function sendMaxMessage(chatId: string, text: string) {
     body: JSON.stringify({
       text,
       notify: true,
+      attachments: keyboard
+        ? [
+            {
+              type: "inline_keyboard",
+              payload: {
+                buttons: keyboard,
+              },
+            },
+          ]
+        : undefined,
     }),
   });
 
@@ -43,7 +74,7 @@ export async function subscribeMaxWebhook(url: string, secret: string) {
     body: JSON.stringify({
       url,
       secret,
-      update_types: ["message_created"],
+      update_types: ["message_created", "bot_started", "message_callback"],
     }),
   });
 

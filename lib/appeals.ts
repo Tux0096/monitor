@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import type { MaxInlineKeyboard } from "@/lib/max-bot";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { suggestSupportReply } from "@/lib/support-ai";
 import {
@@ -114,12 +115,16 @@ export type SupportMessageInput = {
   senderLastName: string | null;
   text: string;
   photoUrl: string | null;
+  contactPhone?: string | null;
+  contactName?: string | null;
+  contactVerified?: boolean;
   isBot?: boolean;
 };
 
 export type SupportMessageResult = {
   action: "ignored" | "prompt" | "created" | "duplicate" | "skipped";
   reply: string | null;
+  keyboard?: MaxInlineKeyboard;
   appealNumber?: number;
   autoResolved?: boolean;
 };
@@ -522,6 +527,51 @@ export async function getCourierProfile(id: string): Promise<CourierProfile | nu
   return rows[0] ? toCourierProfile(rows[0]) : null;
 }
 
+export async function getCourierProfileByMaxOrPhone(
+  maxUserId: string,
+  phone?: string | null,
+): Promise<CourierProfile | null> {
+  await ensureAppealsSchema();
+  await syncCourierProfilesFromAppeals();
+  const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
+  const rows = await sql()`
+    SELECT *
+    FROM courier_profiles
+    WHERE max_user_id = ${maxUserId}
+       OR (${normalizedPhone}::text IS NOT NULL AND phone = ${normalizedPhone})
+    ORDER BY CASE WHEN max_user_id = ${maxUserId} THEN 0 ELSE 1 END
+    LIMIT 1
+  `;
+  return rows[0] ? toCourierProfile(rows[0]) : null;
+}
+
+export async function listCourierAppealsForBot(
+  maxUserId: string,
+  phone?: string | null,
+  limit = 5,
+): Promise<Appeal[]> {
+  await ensureAppealsSchema();
+  const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
+  const rows = await sql()`
+    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    FROM support_appeals a
+    LEFT JOIN LATERAL (
+      SELECT cp.*
+      FROM courier_profiles cp
+      WHERE
+        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+      LIMIT 1
+    ) cp ON TRUE
+    WHERE a.max_user_id = ${maxUserId}
+       OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone})
+    ORDER BY a.created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map(toAppeal);
+}
+
 export async function listAppeals(status?: string): Promise<Appeal[]> {
   await ensureAppealsSchema();
   await syncCourierProfilesFromAppeals();
@@ -872,6 +922,86 @@ export async function handleSupportGroupMessage(
   return startDialog(conversationKey, input, profile);
 }
 
+export async function handleCourierBotMessage(
+  input: SupportMessageInput,
+): Promise<SupportMessageResult> {
+  await ensureAppealsSchema();
+  if (input.isBot || isBotReplyText(input.text)) return { action: "skipped", reply: null };
+  if (!input.userId) return { action: "skipped", reply: null };
+
+  const conversationKey = `${input.chatId}:${input.userId}`;
+  await appendMessage({
+    appealId: null,
+    conversationKey,
+    direction: "in",
+    maxChatId: input.chatId,
+    maxUserId: input.userId,
+    maxMessageId: input.messageId,
+    text: input.text || (input.contactPhone ? "[контакт MAX]" : ""),
+    photoUrl: input.photoUrl,
+  });
+
+  let profile =
+    (await getCourierProfileByMaxOrPhone(input.userId, input.contactPhone)) ??
+    (await upsertCourierProfile(input.userId, {
+      displayName: input.senderName,
+      lastName: input.senderLastName,
+    }));
+
+  if (input.contactPhone) {
+    if (!input.contactVerified) {
+      return {
+        action: "prompt",
+        reply:
+          "Не удалось подтвердить, что это номер из вашего аккаунта MAX. Нажмите кнопку «Передать мой телефон» в сообщении бота.",
+        keyboard: requestContactKeyboard(),
+      };
+    }
+    profile = await upsertCourierProfile(input.userId, {
+      displayName: input.contactName ?? input.senderName ?? profile.displayName,
+      lastName: input.senderLastName ?? profile.lastName,
+      phone: input.contactPhone,
+    });
+  }
+
+  const dialog = await getDialog(conversationKey);
+  const text = input.text.trim();
+  if (dialog?.state) {
+    if (isPortalMenuCommand(text)) {
+      await clearDialog(conversationKey);
+      return renderCourierBotCard(input.userId, profile);
+    }
+    return continueDialog(conversationKey, dialog.state, dialog.draft, input, profile);
+  }
+
+  if (!profile.phone) {
+    return {
+      action: "prompt",
+      reply:
+        "Чтобы открыть личную карточку курьера, подтвердите номер телефона из вашего аккаунта MAX. Так нельзя указать чужой номер.",
+      keyboard: requestContactKeyboard(),
+    };
+  }
+
+  if (isCreateAppealCommand(text)) {
+    return startDialog(
+      conversationKey,
+      { ...input, text: "создать обращение" },
+      profile,
+    );
+  }
+
+  if (isPortalMenuCommand(text) || !text) {
+    return renderCourierBotCard(input.userId, profile);
+  }
+
+  return {
+    action: "prompt",
+    reply: "Выберите действие:",
+    keyboard: courierPortalKeyboard(),
+  };
+}
+
 async function startDialog(
   conversationKey: string,
   input: SupportMessageInput,
@@ -1084,6 +1214,98 @@ function prompt(
   });
 }
 
+async function renderCourierBotCard(
+  maxUserId: string,
+  profile: CourierProfile,
+): Promise<SupportMessageResult> {
+  const appeals = await listCourierAppealsForBot(maxUserId, profile.phone, 7);
+  const lastAppeals = appeals.length
+    ? appeals
+        .map(
+          (appeal) =>
+            `№${appeal.appealNumber} · ${statusLabel(appeal.status)} · ${formatDateTime(appeal.createdAt)}\n${shorten(
+              oneLine(appeal.issueText),
+              90,
+            )}`,
+        )
+        .join("\n\n")
+    : "Обращений пока нет.";
+
+  const lines = [
+    "Личная карточка курьера",
+    "",
+    `ФИО: ${profile.displayName ?? profile.lastName ?? "не указано"}`,
+    `Фамилия: ${profile.lastName ?? "не указана"}`,
+    `Телефон: ${profile.phone ?? "не указан"}`,
+    `MAX ID: ${profile.maxUserId}`,
+    `Модель телефона: ${profile.phoneModel ?? "не указана"}`,
+    `ОС: ${profile.os ?? "не указана"}`,
+    `Версия приложения: ${profile.appVersion ?? "не указана"}`,
+    `Всего обращений: ${profile.totalAppeals}`,
+    profile.lastAppealAt ? `Последнее обращение: ${formatDateTime(profile.lastAppealAt)}` : "",
+    "",
+    "Последние обращения:",
+    lastAppeals,
+  ].filter(Boolean);
+
+  return {
+    action: "prompt",
+    reply: lines.join("\n"),
+    keyboard: courierPortalKeyboard(),
+  };
+}
+
+function courierPortalKeyboard(): MaxInlineKeyboard {
+  return [
+    [{ type: "message", text: "Создать обращение" }],
+    [{ type: "message", text: "Моя карточка" }],
+    [{ type: "request_contact", text: "Обновить телефон" }],
+  ];
+}
+
+function requestContactKeyboard(): MaxInlineKeyboard {
+  return [[{ type: "request_contact", text: "Передать мой телефон" }]];
+}
+
+function isPortalMenuCommand(text: string) {
+  return /^(?:\/start|start|открыть|меню|моя карточка|личный кабинет|карточка|мои обращения)$/i.test(
+    text.trim(),
+  );
+}
+
+function isCreateAppealCommand(text: string) {
+  return /(?:создать|новое|оформить|зарегистрировать).{0,20}обращ/i.test(text.trim());
+}
+
+function statusLabel(status: AppealStatus) {
+  switch (status) {
+    case "closed":
+      return "закрыто";
+    case "in_progress":
+      return "в работе";
+    default:
+      return "открыто";
+  }
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function oneLine(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function shorten(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
+
 function nextMissingField(draft: AppealDraft, requiredFields: SupportRequiredField[]): DialogState | null {
   for (const field of requiredFields) {
     if (!draft[field]) return field;
@@ -1179,11 +1401,15 @@ const PHONE_PATTERN =
 function extractPhone(text: string) {
   const match = text.match(PHONE_PATTERN);
   if (!match) return null;
-  const digits = match[0].replace(/\D/g, "");
+  return normalizePhoneForStorage(match[0]);
+}
+
+function normalizePhoneForStorage(value: string) {
+  const digits = value.replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("8")) return `+7${digits.slice(1)}`;
   if (digits.length === 11 && digits.startsWith("7")) return `+${digits}`;
   if (digits.length === 10 && digits.startsWith("9")) return `+7${digits}`;
-  return match[0].trim();
+  return value.trim();
 }
 
 function extractLastName(text: string) {

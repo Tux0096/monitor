@@ -1,6 +1,7 @@
 import { appendFile } from "node:fs/promises";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { handleSupportGroupMessage } from "@/lib/appeals";
+import { handleCourierBotMessage, handleSupportGroupMessage } from "@/lib/appeals";
 import { sendMaxMessage } from "@/lib/max-bot";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 
@@ -11,6 +12,9 @@ type MaxWebhookBody = {
   updateType?: string;
   payload?: {
     message?: MaxMessage;
+    chat_id?: string | number;
+    user_id?: string | number;
+    user?: MaxMessage["user"];
   };
   message?: MaxMessage;
 };
@@ -20,6 +24,14 @@ type MaxAttachment = {
   payload?: {
     url?: string;
     photo_id?: string | number;
+    vcf_info?: string;
+    max_info?: {
+      phone?: string;
+      name?: string;
+      first_name?: string;
+      last_name?: string;
+    };
+    hash?: string;
   };
 };
 
@@ -77,6 +89,26 @@ export async function POST(request: Request) {
   await logWebhookEvent({ event: "received", updateType: updateType ?? "unknown" });
   const message = body?.payload?.message ?? body?.message;
 
+  if (updateType === "bot_started") {
+    const parsedStart = parseBotStarted(body);
+    if (parsedStart) {
+      const result = await handleCourierBotMessage({
+        chatId: parsedStart.chatId,
+        userId: parsedStart.userId,
+        messageId: null,
+        senderName: parsedStart.senderName,
+        senderLastName: null,
+        text: "открыть",
+        photoUrl: null,
+      });
+      if (result.reply) {
+        await sendMaxMessage(parsedStart.chatId, result.reply, result.keyboard);
+      }
+      return Response.json({ ok: true, action: result.action });
+    }
+    return Response.json({ ok: true, skipped: "unparsed_bot_started" });
+  }
+
   if (updateType && updateType !== "message_created") {
     return Response.json({ ok: true });
   }
@@ -92,7 +124,8 @@ export async function POST(request: Request) {
     Boolean(message?.user?.is_bot ?? message?.user?.isBot) ||
     (botUserId != null && parsed.userId === botUserId);
 
-  const result = await handleSupportGroupMessage({
+  const handler = parsed.isDialog ? handleCourierBotMessage : handleSupportGroupMessage;
+  const result = await handler({
     chatId: parsed.chatId,
     userId: parsed.userId,
     messageId: parsed.messageId,
@@ -100,12 +133,15 @@ export async function POST(request: Request) {
     senderLastName: parsed.senderLastName,
     text: parsed.text,
     photoUrl: parsed.photoUrl,
+    contactPhone: parsed.contactPhone,
+    contactName: parsed.contactName,
+    contactVerified: parsed.contactVerified,
     isBot,
   });
 
   if (result.reply) {
     try {
-      await sendMaxMessage(parsed.chatId, result.reply);
+      await sendMaxMessage(parsed.chatId, result.reply, result.keyboard);
     } catch (error) {
       await logWebhookEvent({
         chatId: parsed.chatId,
@@ -140,7 +176,8 @@ function parseMaxMessage(message?: MaxMessage) {
 
   const text = (message.body?.text ?? message.text ?? "").trim();
   const photoUrl = extractPhotoUrl(message.body?.attachments);
-  if (!text && !photoUrl) return null;
+  const contact = extractVerifiedContact(message.body?.attachments);
+  if (!text && !photoUrl && !contact?.phone) return null;
 
   const chatId = stringifyId(
     message.recipient?.chat_id ??
@@ -167,8 +204,25 @@ function parseMaxMessage(message?: MaxMessage) {
     userId,
     text,
     photoUrl,
+    contactPhone: contact?.phone ?? null,
+    contactName: contact?.name ?? null,
+    contactVerified: contact?.verified ?? false,
+    isDialog: isDialog(message),
     senderName: formatSenderName(sender),
     senderLastName: formatSenderLastName(sender),
+  };
+}
+
+function parseBotStarted(body: MaxWebhookBody | null) {
+  const payload = body?.payload;
+  const chatId = stringifyId(payload?.chat_id ?? body?.message?.chat_id ?? body?.message?.chatId);
+  const user = payload?.user ?? body?.message?.sender ?? body?.message?.user;
+  const userId = stringifyId(payload?.user_id ?? user?.id);
+  if (!chatId || !userId) return null;
+  return {
+    chatId,
+    userId,
+    senderName: formatSenderName(user),
   };
 }
 
@@ -182,6 +236,64 @@ function extractPhotoUrl(attachments?: MaxAttachment[]) {
     }
   }
   return null;
+}
+
+function extractVerifiedContact(attachments?: MaxAttachment[]) {
+  if (!attachments?.length) return null;
+  for (const attachment of attachments) {
+    if (attachment.type?.toLowerCase() !== "contact") continue;
+    const payload = attachment.payload;
+    const vcfInfo = normalizeVcf(payload?.vcf_info);
+    const phone =
+      extractPhoneFromVcf(vcfInfo) ??
+      normalizePhone(payload?.max_info?.phone ?? "");
+    const name = payload?.max_info?.name ?? extractNameFromVcf(vcfInfo);
+    return {
+      phone,
+      name,
+      verified: Boolean(phone && vcfInfo && payload?.hash && verifyContactHash(vcfInfo, payload.hash)),
+    };
+  }
+  return null;
+}
+
+function verifyContactHash(vcfInfo: string, expectedHash: string) {
+  const token = getRuntimeEnv("MAX_BOT_TOKEN");
+  if (!token) return false;
+  const keys = [token, token.replace(/^Bearer\s+/i, "")].filter(Boolean);
+  return keys.some((key) => {
+    const actual = createHmac("sha256", key).update(vcfInfo).digest("hex");
+    return safeEqualHex(actual, expectedHash);
+  });
+}
+
+function safeEqualHex(left: string, right: string) {
+  const normalizedRight = right.trim().toLowerCase();
+  if (!/^[a-f0-9]+$/i.test(normalizedRight) || left.length !== normalizedRight.length) {
+    return false;
+  }
+  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(normalizedRight, "hex"));
+}
+
+function normalizeVcf(value?: string) {
+  return value?.replaceAll("\\r\\n", "\r\n").replaceAll("\\n", "\n") ?? null;
+}
+
+function extractPhoneFromVcf(vcfInfo: string | null) {
+  const match = vcfInfo?.match(/TEL[^:]*:([+\d\s().-]+)/i);
+  return normalizePhone(match?.[1] ?? "");
+}
+
+function extractNameFromVcf(vcfInfo: string | null) {
+  return vcfInfo?.match(/FN:([^\r\n]+)/i)?.[1]?.trim() ?? null;
+}
+
+function normalizePhone(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("8")) return `+7${digits.slice(1)}`;
+  if (digits.length === 11 && digits.startsWith("7")) return `+${digits}`;
+  if (digits.length === 10 && digits.startsWith("9")) return `+7${digits}`;
+  return value.trim() || null;
 }
 
 function isDialog(message: MaxMessage) {
