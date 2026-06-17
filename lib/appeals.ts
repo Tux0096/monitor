@@ -78,12 +78,14 @@ export type Appeal = {
   aiSuggestedReply: string | null;
   operatorReply: string | null;
   duplicateOf: number | null;
+  mergedIntoId: string | null;
   resultText: string | null;
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
   courierProfile: CourierProfile | null;
   messages: SupportMessage[];
+  mergedAppeals: Appeal[];
 };
 
 export type AppealAnalyticsRow = {
@@ -250,6 +252,7 @@ async function migrateAppealsSchema() {
     ["ai_suggested_reply", "text"],
     ["operator_reply", "text"],
     ["duplicate_of", "integer"],
+    ["merged_into_id", "uuid"],
   ]);
   await addColumns("courier_profiles", [
     ["display_name", "text"],
@@ -292,6 +295,11 @@ async function migrateAppealsSchema() {
     CREATE UNIQUE INDEX IF NOT EXISTS support_appeals_max_message_id_key
     ON support_appeals (max_message_id)
     WHERE max_message_id IS NOT NULL
+  `;
+  await sql()`
+    CREATE INDEX IF NOT EXISTS support_appeals_merged_into_idx
+    ON support_appeals (merged_into_id)
+    WHERE merged_into_id IS NOT NULL
   `;
   await sql()`
     CREATE INDEX IF NOT EXISTS support_appeals_user_status_created_idx
@@ -466,6 +474,184 @@ export async function updateAppealClassification(
   `;
 
   return getAppeal(id);
+}
+
+export async function updateAppealByOperator(
+  id: string,
+  input: {
+    issueText?: string;
+    resultText?: string;
+    operatorReply?: string;
+    status?: AppealStatus;
+  },
+): Promise<Appeal | null> {
+  await ensureAppealsSchema();
+  const appeal = await getAppeal(id);
+  if (!appeal) return null;
+  if (appeal.mergedIntoId) {
+    throw new Error("Нельзя редактировать обращение, объединённое в другой контур");
+  }
+
+  const issueText = input.issueText?.trim();
+  const resultText = input.resultText?.trim();
+  const operatorReply = input.operatorReply?.trim();
+  const reopen = input.status === "open";
+  const close = input.status === "closed";
+
+  let nextIssueText = appeal.issueText;
+  if (issueText && issueText !== appeal.issueText) {
+    nextIssueText = issueText;
+  }
+
+  let classification = appeal.classification;
+  let category = appeal.category;
+  let subcategory = appeal.subcategory;
+  let priority = appeal.priority;
+  let confidence = appeal.confidence;
+  let descriptionNormalized = normalizeSupportText(nextIssueText);
+
+  if (issueText && issueText !== appeal.issueText) {
+    const next = classifySupportText(issueText);
+    classification = next.category;
+    category = next.categoryLabel;
+    subcategory = next.subcategory;
+    priority = next.priority;
+    confidence = next.confidence;
+    descriptionNormalized = normalizeSupportText(issueText);
+  }
+
+  const nextStatus: AppealStatus = reopen ? "open" : close ? "closed" : appeal.status;
+  const nextResultText =
+    resultText !== undefined ? resultText || null : appeal.resultText;
+  const nextOperatorReply =
+    operatorReply !== undefined ? operatorReply || null : appeal.operatorReply;
+
+  await sql()`
+    UPDATE support_appeals
+    SET issue_text = ${nextIssueText},
+        result_text = ${nextResultText},
+        operator_reply = ${nextOperatorReply},
+        status = ${nextStatus},
+        classification = ${classification},
+        category = ${category},
+        subcategory = ${subcategory},
+        priority = ${priority},
+        confidence = ${confidence},
+        description_normalized = ${descriptionNormalized},
+        classification_source = CASE
+          WHEN ${Boolean(issueText && issueText !== appeal.issueText)} THEN 'operator'
+          ELSE classification_source
+        END,
+        closed_at = CASE
+          WHEN ${reopen} THEN NULL
+          WHEN ${close} OR (${nextStatus} = 'closed' AND closed_at IS NULL) THEN now()
+          ELSE closed_at
+        END,
+        updated_at = now()
+    WHERE id = ${id}
+  `;
+
+  if (operatorReply && operatorReply !== appeal.operatorReply) {
+    await appendMessage({
+      appealId: id,
+      conversationKey:
+        appeal.maxChatId && appeal.maxUserId ? `${appeal.maxChatId}:${appeal.maxUserId}` : null,
+      direction: "operator",
+      maxChatId: appeal.maxChatId,
+      maxUserId: appeal.maxUserId,
+      maxMessageId: null,
+      text: operatorReply,
+      photoUrl: null,
+    });
+  }
+
+  return getAppeal(id);
+}
+
+export async function reopenAppeal(id: string): Promise<Appeal | null> {
+  return updateAppealByOperator(id, { status: "open" });
+}
+
+export async function mergeAppealsInto(
+  primaryId: string,
+  secondaryIds: string[],
+): Promise<Appeal | null> {
+  await ensureAppealsSchema();
+  const primary = await getAppeal(primaryId);
+  if (!primary) return null;
+  if (primary.mergedIntoId) {
+    throw new Error("Нельзя объединять в обращение, которое уже вложено в другой контур");
+  }
+
+  const uniqueSecondaryIds = [...new Set(secondaryIds.filter((id) => id && id !== primaryId))];
+  if (uniqueSecondaryIds.length === 0) {
+    throw new Error("Выберите обращения для объединения");
+  }
+
+  for (const secondaryId of uniqueSecondaryIds) {
+    const secondary = await getAppeal(secondaryId);
+    if (!secondary) continue;
+    if (secondary.mergedIntoId) {
+      throw new Error(`Обращение №${secondary.appealNumber} уже объединено`);
+    }
+    if (secondary.mergedAppeals.length > 0) {
+      throw new Error(`Обращение №${secondary.appealNumber} уже является контуром для других обращений`);
+    }
+
+    await sql()`
+      UPDATE support_messages
+      SET appeal_id = ${primaryId}
+      WHERE appeal_id = ${secondaryId}
+    `;
+
+    await appendMessage({
+      appealId: primaryId,
+      conversationKey:
+        primary.maxChatId && primary.maxUserId
+          ? `${primary.maxChatId}:${primary.maxUserId}`
+          : null,
+      direction: "system",
+      maxChatId: primary.maxChatId,
+      maxUserId: primary.maxUserId,
+      maxMessageId: null,
+      text: [
+        `Объединено обращение №${secondary.appealNumber}`,
+        `Дата: ${formatDateTime(secondary.createdAt)}`,
+        "",
+        secondary.issueText,
+        secondary.resultText ? `\nИтог: ${secondary.resultText}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      photoUrl: secondary.photoUrl,
+    });
+
+    if (!primary.photoUrl && secondary.photoUrl) {
+      await sql()`
+        UPDATE support_appeals
+        SET photo_url = ${secondary.photoUrl}
+        WHERE id = ${primaryId} AND photo_url IS NULL
+      `;
+    }
+
+    await sql()`
+      UPDATE support_appeals
+      SET merged_into_id = ${primaryId},
+          status = 'closed',
+          result_text = ${`Объединено с обращением №${primary.appealNumber}`},
+          closed_at = COALESCE(closed_at, now()),
+          updated_at = now()
+      WHERE id = ${secondaryId}
+    `;
+  }
+
+  await sql()`
+    UPDATE support_appeals
+    SET updated_at = now()
+    WHERE id = ${primaryId}
+  `;
+
+  return getAppeal(primaryId);
 }
 
 function patchIssueTextCategory(issueText: string, classification: SupportClassification) {
@@ -835,6 +1021,7 @@ export async function listAppeals(status?: string): Promise<Appeal[]> {
             LIMIT 1
           ) cp ON TRUE
           WHERE a.status = ${status}
+            AND a.merged_into_id IS NULL
           ORDER BY a.created_at DESC
           LIMIT 200
         `
@@ -850,11 +1037,13 @@ export async function listAppeals(status?: string): Promise<Appeal[]> {
             ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
             LIMIT 1
           ) cp ON TRUE
+          WHERE a.merged_into_id IS NULL
           ORDER BY a.created_at DESC
           LIMIT 200
         `;
   const appeals = rows.map(toAppeal);
   await attachMessages(appeals);
+  await attachMergedAppeals(appeals);
   return appeals;
 }
 
@@ -878,7 +1067,41 @@ export async function getAppeal(id: string): Promise<Appeal | null> {
   if (!rows[0]) return null;
   const appeal = toAppeal(rows[0]);
   await attachMessages([appeal]);
+  await attachMergedAppeals([appeal]);
   return appeal;
+}
+
+async function attachMergedAppeals(appeals: Appeal[]) {
+  const ids = appeals.map((appeal) => appeal.id);
+  if (ids.length === 0) return;
+
+  const rows = await sql()`
+    SELECT a.*, row_to_json(cp.*) AS courier_profile
+    FROM support_appeals a
+    LEFT JOIN LATERAL (
+      SELECT cp.*
+      FROM courier_profiles cp
+      WHERE
+        (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+        OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+      ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+      LIMIT 1
+    ) cp ON TRUE
+    WHERE a.merged_into_id = ANY(${ids})
+    ORDER BY a.created_at ASC
+  `;
+
+  const byPrimary = new Map<string, Appeal[]>();
+  for (const row of rows) {
+    const primaryId = String(row.merged_into_id);
+    const list = byPrimary.get(primaryId) ?? [];
+    list.push(toAppeal(row));
+    byPrimary.set(primaryId, list);
+  }
+
+  for (const appeal of appeals) {
+    appeal.mergedAppeals = byPrimary.get(appeal.id) ?? [];
+  }
 }
 
 async function attachMessages(appeals: Appeal[]) {
@@ -1827,12 +2050,14 @@ function toAppeal(row: postgres.Row): Appeal {
     aiSuggestedReply: nullableString(row.ai_suggested_reply),
     operatorReply: nullableString(row.operator_reply),
     duplicateOf: row.duplicate_of == null ? null : Number(row.duplicate_of),
+    mergedIntoId: nullableString(row.merged_into_id),
     resultText: nullableString(row.result_text),
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
     closedAt: row.closed_at ? new Date(row.closed_at as string).toISOString() : null,
     courierProfile: row.courier_profile ? toCourierProfile(row.courier_profile as postgres.Row) : null,
     messages: [],
+    mergedAppeals: [],
   };
 }
 

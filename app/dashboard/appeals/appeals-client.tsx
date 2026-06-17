@@ -23,6 +23,12 @@ type CourierDraft = Pick<
   tagsText: string;
 };
 
+type AppealDraft = {
+  issueText: string;
+  resultText: string;
+  operatorReply: string;
+};
+
 export function AppealsClient() {
   const searchParams = useSearchParams();
   const courierFilter = searchParams.get("courier");
@@ -31,6 +37,9 @@ export function AppealsClient() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState<Record<string, string>>({});
   const [courierDrafts, setCourierDrafts] = useState<Record<string, CourierDraft>>({});
+  const [appealDrafts, setAppealDrafts] = useState<Record<string, AppealDraft>>({});
+  const [mergeSelection, setMergeSelection] = useState<Record<string, boolean>>({});
+  const [mergeMode, setMergeMode] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<SupportCategory[]>([]);
   const [dateFrom, setDateFrom] = useState("");
@@ -73,6 +82,13 @@ export function AppealsClient() {
         }
         return next;
       });
+      setAppealDrafts((current) => {
+        const next = { ...current };
+        for (const appeal of data.appeals) {
+          next[appeal.id] ??= toAppealDraft(appeal);
+        }
+        return next;
+      });
     } finally {
       setLoading(false);
     }
@@ -99,6 +115,45 @@ export function AppealsClient() {
       body: JSON.stringify({ resultText: replyText[id] || "Обращение обработано" }),
     });
     if (response.ok) await loadAppeals();
+  }
+
+  async function saveAppeal(appeal: Appeal, options?: { status?: "open" | "closed" }) {
+    const draft = appealDrafts[appeal.id];
+    if (!draft) return;
+    const response = await fetch(`/api/appeals/${appeal.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        issueText: draft.issueText,
+        resultText: draft.resultText,
+        operatorReply: draft.operatorReply,
+        status: options?.status,
+      }),
+    });
+    if (response.ok) await loadAppeals();
+  }
+
+  async function reopenAppeal(id: string) {
+    const response = await fetch(`/api/appeals/${id}/reopen`, { method: "POST" });
+    if (response.ok) await loadAppeals();
+  }
+
+  async function mergeInto(primary: Appeal) {
+    const selectedIds = Object.entries(mergeSelection)
+      .filter(([id, checked]) => checked && id !== primary.id)
+      .map(([id]) => id);
+    if (selectedIds.length === 0) return;
+
+    const response = await fetch(`/api/appeals/${primary.id}/merge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ appealIds: selectedIds }),
+    });
+    if (response.ok) {
+      setMergeSelection({});
+      setMergeMode(false);
+      await loadAppeals();
+    }
   }
 
   async function saveCourier(appeal: Appeal) {
@@ -180,7 +235,15 @@ export function AppealsClient() {
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
-      <Header courierFilter={courierFilter} onRefresh={() => void loadAppeals()} />
+      <Header
+        courierFilter={courierFilter}
+        mergeMode={mergeMode}
+        onToggleMergeMode={() => {
+          setMergeMode((value) => !value);
+          setMergeSelection({});
+        }}
+        onRefresh={() => void loadAppeals()}
+      />
 
       <div className="grid gap-4 sm:grid-cols-3">
         <SummaryCard
@@ -255,6 +318,21 @@ export function AppealsClient() {
                     onClick={() => setExpandedId(expanded ? null : appeal.id)}
                     className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-900"
                   >
+                    {mergeMode ? (
+                      <input
+                        type="checkbox"
+                        checked={Boolean(mergeSelection[appeal.id])}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          setMergeSelection((current) => ({
+                            ...current,
+                            [appeal.id]: event.target.checked,
+                          }));
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                        className="rounded border-zinc-600 bg-zinc-900 text-sky-500"
+                      />
+                    ) : null}
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-medium text-white">№{appeal.appealNumber}</span>
@@ -272,6 +350,11 @@ export function AppealsClient() {
                           }}
                         />
                         <StatusBadge appeal={appeal} />
+                        {appeal.mergedAppeals.length > 0 ? (
+                          <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-200">
+                            контур · {appeal.mergedAppeals.length + 1}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-1 truncate text-xs text-zinc-500">
                         {new Date(appeal.createdAt).toLocaleString("ru-RU")}
@@ -296,14 +379,21 @@ export function AppealsClient() {
                       />
                       <div className="mt-4 grid gap-4 lg:grid-cols-[1.3fr_0.9fr]">
                         <div>
-                          <div className="rounded-lg bg-zinc-950 p-3">
-                            <p className="whitespace-pre-wrap text-sm text-zinc-300">{appeal.issueText}</p>
-                            {appeal.photoUrl ? (
-                              <a href={appeal.photoUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-sm text-sky-400 hover:text-sky-300">
-                                Открыть фото
-                              </a>
-                            ) : null}
-                          </div>
+                          <AppealEditor
+                            appeal={appeal}
+                            draft={appealDrafts[appeal.id] ?? toAppealDraft(appeal)}
+                            onChange={(draft) =>
+                              setAppealDrafts((current) => ({ ...current, [appeal.id]: draft }))
+                            }
+                            onSave={(options) => void saveAppeal(appeal, options)}
+                            onReopen={() => void reopenAppeal(appeal.id)}
+                          />
+
+                          {appeal.photoUrl ? (
+                            <a href={appeal.photoUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-sm text-sky-400 hover:text-sky-300">
+                              Открыть фото
+                            </a>
+                          ) : null}
 
                           {appeal.photoAnalysis ? (
                             <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-400">
@@ -312,43 +402,25 @@ export function AppealsClient() {
                           ) : null}
 
                           <MessageHistory appeal={appeal} />
+                          <MergedContour appeals={appeal.mergedAppeals} />
 
-                          {appeal.status === "closed" ? (
-                            <p className="mt-3 rounded-lg bg-zinc-950 p-3 text-sm text-zinc-400">
-                              {appeal.resultText ?? "Обращение закрыто"}
-                            </p>
-                          ) : (
-                            <div className="mt-4 space-y-3">
-                              {appeal.aiSummary ? (
-                                <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
-                                  {appeal.aiSummary}
-                                  <div className="mt-1 text-xs text-amber-200/80">
-                                    AI не смог закрыть обращение автоматически — нужен ответ оператора.
-                                  </div>
-                                </div>
-                              ) : null}
-                              <textarea
-                                value={replyText[appeal.id] ?? ""}
-                                onChange={(event) =>
-                                  setReplyText((current) => ({ ...current, [appeal.id]: event.target.value }))
-                                }
-                                placeholder="Ответ оператора в MAX"
-                                rows={3}
-                                className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
-                              />
-                              <div className="flex flex-wrap gap-2">
-                                <button type="button" onClick={() => void sendReply(appeal.id)} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500">
-                                  Отправить в MAX
-                                </button>
-                                <button type="button" onClick={() => void sendReply(appeal.id, true)} className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-emerald-400">
-                                  Отправить и закрыть
-                                </button>
-                                <button type="button" onClick={() => void close(appeal.id)} className="rounded-lg border border-emerald-500/40 px-4 py-2 text-sm text-emerald-200">
-                                  Закрыть без отправки
-                                </button>
-                              </div>
-                            </div>
-                          )}
+                          <AppealReplyPanel
+                            appeal={appeal}
+                            replyText={replyText[appeal.id] ?? appealDrafts[appeal.id]?.operatorReply ?? ""}
+                            onReplyChange={(text) =>
+                              setReplyText((current) => ({ ...current, [appeal.id]: text }))
+                            }
+                            onSend={(close) => void sendReply(appeal.id, close)}
+                            onClose={() => void close(appeal.id)}
+                          />
+
+                          {mergeMode ? (
+                            <MergePanel
+                              primary={appeal}
+                              selectedCount={Object.values(mergeSelection).filter(Boolean).length}
+                              onMerge={() => void mergeInto(appeal)}
+                            />
+                          ) : null}
                         </div>
 
                         <CourierCard
@@ -372,7 +444,17 @@ export function AppealsClient() {
   );
 }
 
-function Header({ courierFilter, onRefresh }: { courierFilter: string | null; onRefresh: () => void }) {
+function Header({
+  courierFilter,
+  mergeMode,
+  onToggleMergeMode,
+  onRefresh,
+}: {
+  courierFilter: string | null;
+  mergeMode: boolean;
+  onToggleMergeMode: () => void;
+  onRefresh: () => void;
+}) {
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div>
@@ -388,9 +470,22 @@ function Header({ courierFilter, onRefresh }: { courierFilter: string | null; on
           </p>
         ) : null}
       </div>
-      <button type="button" onClick={onRefresh} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500 hover:text-white">
-        Обновить
-      </button>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onToggleMergeMode}
+          className={
+            mergeMode
+              ? "rounded-lg border border-violet-400/50 bg-violet-500/10 px-4 py-2 text-sm text-violet-100"
+              : "rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500 hover:text-white"
+          }
+        >
+          {mergeMode ? "Отменить объединение" : "Объединить обращения"}
+        </button>
+        <button type="button" onClick={onRefresh} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500 hover:text-white">
+          Обновить
+        </button>
+      </div>
     </div>
   );
 }
@@ -525,6 +620,195 @@ function StatusBadge({ appeal }: { appeal: Appeal }) {
     >
       {autoResolved ? "AI ответил" : appeal.status === "closed" ? "закрыто" : "ждёт оператора"}
     </span>
+  );
+}
+
+function AppealEditor({
+  appeal,
+  draft,
+  onChange,
+  onSave,
+  onReopen,
+}: {
+  appeal: Appeal;
+  draft: AppealDraft;
+  onChange: (draft: AppealDraft) => void;
+  onSave: (options?: { status?: "open" | "closed" }) => void;
+  onReopen: () => void;
+}) {
+  const autoResolved =
+    appeal.status === "closed" &&
+    Boolean(appeal.aiSuggestedReply) &&
+    appeal.resultText === appeal.aiSuggestedReply;
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm font-medium text-white">Карточка обращения</div>
+        {autoResolved ? (
+          <span className="text-xs text-blue-300">Закрыто AI — можно исправить</span>
+        ) : appeal.status === "closed" ? (
+          <span className="text-xs text-zinc-500">Закрытое обращение</span>
+        ) : null}
+      </div>
+
+      <label className="mt-3 block text-xs text-zinc-500">
+        Описание / данные обращения
+        <textarea
+          value={draft.issueText}
+          onChange={(event) => onChange({ ...draft, issueText: event.target.value })}
+          rows={8}
+          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+        />
+      </label>
+
+      <label className="mt-3 block text-xs text-zinc-500">
+        Итоговый ответ / результат
+        <textarea
+          value={draft.resultText}
+          onChange={(event) => onChange({ ...draft, resultText: event.target.value })}
+          rows={4}
+          placeholder="Текст, который увидит курьер как итог"
+          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+        />
+      </label>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => onSave()}
+          className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:border-zinc-500"
+        >
+          Сохранить изменения
+        </button>
+        {appeal.status === "closed" ? (
+          <button
+            type="button"
+            onClick={onReopen}
+            className="rounded-lg border border-amber-500/40 px-3 py-2 text-sm text-amber-200"
+          >
+            Открыть снова
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onSave({ status: "closed" })}
+            className="rounded-lg border border-emerald-500/40 px-3 py-2 text-sm text-emerald-200"
+          >
+            Сохранить и закрыть
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AppealReplyPanel({
+  appeal,
+  replyText,
+  onReplyChange,
+  onSend,
+  onClose,
+}: {
+  appeal: Appeal;
+  replyText: string;
+  onReplyChange: (text: string) => void;
+  onSend: (close: boolean) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="mt-4 space-y-3">
+      {appeal.aiSummary && appeal.status !== "closed" ? (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
+          {appeal.aiSummary}
+          <div className="mt-1 text-xs text-amber-200/80">
+            AI не смог закрыть обращение автоматически — нужен ответ оператора.
+          </div>
+        </div>
+      ) : null}
+      <label className="block text-xs text-zinc-500">
+        Ответ оператора в MAX
+        <textarea
+          value={replyText}
+          onChange={(event) => onReplyChange(event.target.value)}
+          placeholder="Сообщение курьеру в MAX"
+          rows={3}
+          className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => onSend(false)}
+          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500"
+        >
+          Отправить в MAX
+        </button>
+        <button
+          type="button"
+          onClick={() => onSend(true)}
+          className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-emerald-400"
+        >
+          Отправить и закрыть
+        </button>
+        {appeal.status !== "closed" ? (
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-emerald-500/40 px-4 py-2 text-sm text-emerald-200"
+          >
+            Закрыть без отправки
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function MergedContour({ appeals }: { appeals: Appeal[] }) {
+  if (appeals.length === 0) return null;
+  return (
+    <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
+      <div className="mb-2 text-xs uppercase tracking-wide text-violet-300">Единый контур</div>
+      <div className="space-y-2">
+        {appeals.map((appeal) => (
+          <div key={appeal.id} className="rounded-lg border border-violet-500/10 bg-zinc-950/80 p-3 text-sm">
+            <div className="font-medium text-zinc-200">
+              №{appeal.appealNumber} · {new Date(appeal.createdAt).toLocaleString("ru-RU")}
+            </div>
+            <p className="mt-2 whitespace-pre-wrap text-xs text-zinc-400">{appeal.issueText}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MergePanel({
+  primary,
+  selectedCount,
+  onMerge,
+}: {
+  primary: Appeal;
+  selectedCount: number;
+  onMerge: () => void;
+}) {
+  return (
+    <div className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3">
+      <div className="text-sm font-medium text-violet-100">Объединение в контур</div>
+      <p className="mt-2 text-xs text-violet-100/80">
+        Отметьте другие обращения чекбоксами в списке и объедините их с №{primary.appealNumber}.
+        История и сообщения перейдут сюда, вторичные обращения будут закрыты.
+      </p>
+      <button
+        type="button"
+        disabled={selectedCount === 0}
+        onClick={onMerge}
+        className="mt-3 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
+      >
+        Объединить выбранные ({selectedCount})
+      </button>
+    </div>
   );
 }
 
@@ -776,6 +1060,14 @@ const CategoryFilterDropdown = forwardRef<
     </div>
   );
 });
+
+function toAppealDraft(appeal: Appeal): AppealDraft {
+  return {
+    issueText: appeal.issueText,
+    resultText: appeal.resultText ?? appeal.aiSuggestedReply ?? appeal.operatorReply ?? "",
+    operatorReply: appeal.operatorReply ?? appeal.aiSuggestedReply ?? "",
+  };
+}
 
 function toCourierDraft(appeal: Appeal): CourierDraft {
   const profile = appeal.courierProfile;
