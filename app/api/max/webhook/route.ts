@@ -102,7 +102,9 @@ export async function POST(request: Request) {
         photoUrl: null,
       });
       if (result.reply) {
-        await sendMaxMessage(parsedStart.chatId, result.reply, result.keyboard);
+        const welcome =
+          "Добро пожаловать! Нажмите «Открыть» — там личный кабинет и форма обращения с фото.";
+        await sendMaxMessage(parsedStart.chatId, welcome, result.keyboard);
       }
       return Response.json({ ok: true, action: result.action });
     }

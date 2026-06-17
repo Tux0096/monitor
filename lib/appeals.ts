@@ -545,6 +545,250 @@ export async function getCourierProfileByMaxOrPhone(
   return rows[0] ? toCourierProfile(rows[0]) : null;
 }
 
+export type CourierMiniAppProfile = {
+  displayName: string | null;
+  lastName: string | null;
+  phone: string | null;
+  totalAppeals: number;
+  lastAppealAt: string | null;
+};
+
+export type CourierMiniAppAppeal = {
+  appealNumber: number;
+  status: AppealStatus;
+  createdAt: string;
+  shortText: string;
+};
+
+export type CourierMiniAppBootstrap = {
+  needsPhone: boolean;
+  profile: CourierMiniAppProfile;
+  appeals: CourierMiniAppAppeal[];
+};
+
+function toCourierMiniAppProfile(profile: CourierProfile): CourierMiniAppProfile {
+  return {
+    displayName: profile.displayName,
+    lastName: profile.lastName,
+    phone: profile.phone,
+    totalAppeals: profile.totalAppeals,
+    lastAppealAt: profile.lastAppealAt,
+  };
+}
+
+function toCourierMiniAppAppeal(appeal: Appeal): CourierMiniAppAppeal {
+  const problemLine =
+    appeal.issueText
+      .split("\n")
+      .find((line) => line.startsWith("Проблема:"))
+      ?.replace(/^Проблема:\s*/, "") ?? appeal.issueText;
+  return {
+    appealNumber: appeal.appealNumber,
+    status: appeal.status,
+    createdAt: appeal.createdAt,
+    shortText: shorten(oneLine(problemLine), 80),
+  };
+}
+
+export async function getCourierMiniAppBootstrap(
+  maxUserId: string,
+  displayName?: string | null,
+  lastName?: string | null,
+): Promise<CourierMiniAppBootstrap> {
+  await ensureAppealsSchema();
+  let profile =
+    (await getCourierProfileByMaxOrPhone(maxUserId)) ??
+    (await upsertCourierProfile(maxUserId, { displayName, lastName }));
+  const needsPhone = !profile.phone;
+  const appeals = needsPhone
+    ? []
+    : (await listCourierAppealsForBot(maxUserId, profile.phone, 5)).map(toCourierMiniAppAppeal);
+  return {
+    needsPhone,
+    profile: toCourierMiniAppProfile(profile),
+    appeals,
+  };
+}
+
+export async function bindCourierPhoneFromMiniApp(
+  maxUserId: string,
+  phone: string,
+  displayName?: string | null,
+  lastName?: string | null,
+): Promise<CourierMiniAppBootstrap> {
+  await ensureAppealsSchema();
+  const normalized = normalizePhoneForStorage(phone);
+  const existing = await getCourierProfileByMaxOrPhone(maxUserId, normalized);
+  const profile = await upsertCourierProfile(maxUserId, {
+    displayName: displayName ?? existing?.displayName,
+    lastName: lastName ?? existing?.lastName,
+    phone: normalized,
+    phoneModel: existing?.phoneModel,
+    os: existing?.os,
+    appVersion: existing?.appVersion,
+  });
+  const appeals = (await listCourierAppealsForBot(maxUserId, profile.phone, 5)).map(toCourierMiniAppAppeal);
+  return {
+    needsPhone: false,
+    profile: toCourierMiniAppProfile(profile),
+    appeals,
+  };
+}
+
+export async function createCourierAppealFromMiniApp(input: {
+  maxUserId: string;
+  chatId: string;
+  senderName?: string | null;
+  description: string;
+  photoUrl?: string | null;
+  phoneModel?: string | null;
+  os?: string | null;
+  appVersion?: string | null;
+}) {
+  await ensureAppealsSchema();
+  const description = input.description.trim();
+  if (description.length < 8) {
+    throw new Error("Опишите проблему подробнее — минимум 8 символов.");
+  }
+
+  const profile =
+    (await getCourierProfileByMaxOrPhone(input.maxUserId)) ??
+    (await upsertCourierProfile(input.maxUserId, { displayName: input.senderName }));
+  if (!profile.phone) {
+    throw new Error("Сначала подтвердите номер телефона.");
+  }
+
+  const draft: AppealDraft = {
+    phone: profile.phone,
+    lastName: profile.lastName ?? undefined,
+    description,
+    photoUrl: input.photoUrl ?? undefined,
+    phoneModel: input.phoneModel?.trim() || profile.phoneModel || undefined,
+    appVersion: input.appVersion?.trim() || profile.appVersion || undefined,
+    os: input.os?.trim() || profile.os || undefined,
+    senderName: input.senderName ?? profile.displayName ?? undefined,
+    classification: classifySupportText(description),
+  };
+
+  const classification = draft.classification!;
+  const duplicateNumber = await findSimilarAppeal(input.maxUserId, description);
+  if (duplicateNumber) {
+    return {
+      action: "duplicate" as const,
+      appealNumber: duplicateNumber,
+      reply: `Обращение №${duplicateNumber} с таким описанием уже зарегистрировано.`,
+      autoResolved: false,
+    };
+  }
+
+  await upsertCourierProfile(input.maxUserId, {
+    displayName: input.senderName ?? profile.displayName,
+    lastName: draft.lastName ?? profile.lastName,
+    phone: draft.phone,
+    phoneModel: draft.phoneModel ?? profile.phoneModel,
+    os: draft.os ?? profile.os,
+    appVersion: draft.appVersion ?? profile.appVersion,
+  });
+
+  const suggestion = await suggestSupportReply({
+    description,
+    classification,
+    photoUrl: draft.photoUrl ?? null,
+    courier: {
+      lastName: draft.lastName ?? profile.lastName,
+      phone: draft.phone ?? profile.phone,
+      phoneModel: draft.phoneModel ?? profile.phoneModel,
+      appVersion: draft.appVersion ?? profile.appVersion,
+      os: draft.os ?? profile.os,
+      notes: profile.notes,
+    },
+  });
+
+  const autoResolved = suggestion.canAutoResolve;
+  const conversationKey = `${input.chatId}:${input.maxUserId}`;
+  const rows = await sql()`
+    INSERT INTO support_appeals (
+      source, status, max_chat_id, max_user_id, max_message_id, sender_name,
+      courier_last_name, phone, phone_model, os, app_version, photo_url,
+      photo_analysis, description_normalized, category, classification, subcategory, priority,
+      confidence, classification_source, order_number, issue_text, ai_summary, ai_suggested_reply,
+      operator_reply, result_text
+    )
+    VALUES (
+      'max', ${autoResolved ? "closed" : "open"}, ${input.chatId}, ${input.maxUserId}, null,
+      ${draft.senderName ?? input.senderName ?? null}, ${draft.lastName ?? null}, ${draft.phone ?? null},
+      ${draft.phoneModel ?? null}, ${draft.os ?? null}, ${draft.appVersion ?? null},
+      ${draft.photoUrl ?? null}, ${suggestion.photoAnalysis ?? null},
+      ${normalizeSupportText(description)}, ${classification.categoryLabel},
+      ${classification.category}, ${classification.subcategory}, ${classification.priority},
+      ${classification.confidence}, 'auto', ${extractOrderNumber(description)}, ${formatIssueText(draft, classification)},
+      ${suggestion.summary}, ${suggestion.suggestedReply},
+      ${autoResolved ? suggestion.suggestedReply : null},
+      ${autoResolved ? suggestion.suggestedReply : null}
+    )
+    RETURNING id, appeal_number
+  `;
+
+  const appealId = String(rows[0].id);
+  const appealNumber = Number(rows[0].appeal_number);
+  if (suggestion.photoAnalysis) {
+    await saveAppealPhotoAnalysis(appealId, suggestion.photoAnalysis);
+  }
+
+  const learningAppeal: LearningAppealInput = {
+    id: appealId,
+    classification: classification.category,
+    category: classification.categoryLabel,
+    subcategory: classification.subcategory,
+    descriptionNormalized: normalizeSupportText(description),
+    issueText: formatIssueText(draft, classification),
+    phoneModel: draft.phoneModel ?? profile.phoneModel,
+    os: draft.os ?? profile.os,
+    appVersion: draft.appVersion ?? profile.appVersion,
+    photoUrl: draft.photoUrl ?? null,
+    photoAnalysis: suggestion.photoAnalysis ?? null,
+  };
+  if (suggestion.photoAnalysis) {
+    await ingestPhotoPattern(learningAppeal, suggestion.photoAnalysis);
+  }
+  if (autoResolved) {
+    await ingestSuccessfulAutoReply(learningAppeal, suggestion.suggestedReply);
+    await sql()`
+      UPDATE support_appeals
+      SET closed_at = now(), updated_at = now()
+      WHERE id = ${appealId}
+    `;
+  }
+
+  await sql()`
+    UPDATE courier_profiles
+    SET total_appeals = total_appeals + 1, last_appeal_at = now(), updated_at = now()
+    WHERE max_user_id = ${input.maxUserId}
+  `;
+
+  const reply = autoResolved
+    ? `Обращение №${appealNumber}.\n\n${suggestion.suggestedReply}`
+    : `Обращение №${appealNumber} зарегистрировано. Оператор подключится и ответит в ближайшее время.`;
+
+  await appendMessage({
+    appealId,
+    conversationKey,
+    direction: autoResolved ? "ai" : "bot",
+    maxChatId: input.chatId,
+    maxUserId: input.maxUserId,
+    maxMessageId: null,
+    text: reply,
+    photoUrl: null,
+  });
+
+  return {
+    action: "created" as const,
+    appealNumber,
+    reply,
+    autoResolved,
+  };
+}
+
 export async function listCourierAppealsForBot(
   maxUserId: string,
   phone?: string | null,
@@ -978,7 +1222,7 @@ export async function handleCourierBotMessage(
     return {
       action: "prompt",
       reply:
-        "Чтобы открыть личную карточку курьера, подтвердите номер телефона из вашего аккаунта MAX. Так нельзя указать чужой номер.",
+        "Нажмите «Открыть» и подтвердите номер телефона из MAX — он сохранится один раз для личного кабинета.",
       keyboard: requestContactKeyboard(),
     };
   }
@@ -1218,34 +1462,14 @@ async function renderCourierBotCard(
   maxUserId: string,
   profile: CourierProfile,
 ): Promise<SupportMessageResult> {
-  const appeals = await listCourierAppealsForBot(maxUserId, profile.phone, 7);
-  const lastAppeals = appeals.length
-    ? appeals
-        .map(
-          (appeal) =>
-            `№${appeal.appealNumber} · ${statusLabel(appeal.status)} · ${formatDateTime(appeal.createdAt)}\n${shorten(
-              oneLine(appeal.issueText),
-              90,
-            )}`,
-        )
-        .join("\n\n")
-    : "Обращений пока нет.";
-
+  const name = profile.displayName ?? profile.lastName ?? "курьер";
   const lines = [
-    "Личная карточка курьера",
+    `${name}`,
+    profile.phone ? `Телефон: ${profile.phone}` : "",
+    `Обращений: ${profile.totalAppeals}`,
+    profile.lastAppealAt ? `Последнее: ${formatDateTime(profile.lastAppealAt)}` : "",
     "",
-    `ФИО: ${profile.displayName ?? profile.lastName ?? "не указано"}`,
-    `Фамилия: ${profile.lastName ?? "не указана"}`,
-    `Телефон: ${profile.phone ?? "не указан"}`,
-    `MAX ID: ${profile.maxUserId}`,
-    `Модель телефона: ${profile.phoneModel ?? "не указана"}`,
-    `ОС: ${profile.os ?? "не указана"}`,
-    `Версия приложения: ${profile.appVersion ?? "не указана"}`,
-    `Всего обращений: ${profile.totalAppeals}`,
-    profile.lastAppealAt ? `Последнее обращение: ${formatDateTime(profile.lastAppealAt)}` : "",
-    "",
-    "Последние обращения:",
-    lastAppeals,
+    "Нажмите «Открыть» для личного кабинета и формы обращения.",
   ].filter(Boolean);
 
   return {
