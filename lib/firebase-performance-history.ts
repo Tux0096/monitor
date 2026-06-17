@@ -478,14 +478,15 @@ function parseProbeTargets(envKey: string, fallback: ProbeTarget[]): ProbeTarget
           const obj = item as Record<string, unknown>;
           const url = typeof obj.url === "string" ? obj.url.trim() : "";
           const name = typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : url;
-          const headers =
+          const headers: Record<string, string> | undefined =
             obj.headers && typeof obj.headers === "object" && !Array.isArray(obj.headers)
               ? Object.fromEntries(
                   Object.entries(obj.headers as Record<string, unknown>).filter(
-                    ([, value]) => typeof value === "string",
+                    (entry): entry is [string, string] => typeof entry[1] === "string",
                   ),
                 )
               : undefined;
+          const requireOk = obj.requireOk === true;
           if (!url) return null;
           const target: ProbeTarget = { name, url };
           if (headers && Object.keys(headers).length > 0) target.headers = headers;
