@@ -40,12 +40,14 @@ if [ ! -f "${APP}/.env.local" ]; then
 fi
 
 echo "==> assemble into ${APP}"
+chmod -R u+w "${APP}/.next" 2>/dev/null || true
 rm -rf "${APP}/.next"
 mkdir -p "${APP}/.next"
 cp -R .next/standalone "${APP}/.next/standalone"
 mkdir -p "${APP}/.next/standalone/.next"
 cp -R .next/static "${APP}/.next/standalone/.next/static"
 if [ -d public ]; then cp -R public "${APP}/.next/standalone/public"; fi
+chmod -R u+w "${APP}/.next" 2>/dev/null || true
 
 cp "${APP}/.env.local" "${APP}/.next/standalone/.env.local"
 chmod 600 "${APP}/.next/standalone/.env.local"
