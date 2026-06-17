@@ -419,27 +419,51 @@ async function fetchPageSpeedReport(siteUrl: string, strategy: "mobile" | "deskt
 // Замеряет реальное время отклика страниц сайта и мобильного приложения.
 // Работает всегда, даже без PageSpeed/Firebase, и пишет в ту же таблицу.
 
-type ProbeTarget = { name: string; url: string };
+type ProbeTarget = {
+  name: string;
+  url: string;
+  headers?: Record<string, string>;
+  /** Только HTTP 2xx считается успешным (для JSON API). */
+  requireOk?: boolean;
+};
 
 const PROBE_SAMPLES = 3;
-const PROBE_TIMEOUT_MS = 30_000;
+const PROBE_TIMEOUT_MS = 60_000;
 const PROBE_UA_SITE =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 FujiMonitor/1.0";
+// UA как у приложения ru.fuji.app (Capacitor WebView на Android)
 const PROBE_UA_MOBILE =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FujiMonitor/1.0";
+  "Mozilla/5.0 (Linux; Android 14; ru.fuji.app) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0 Mobile Safari/537.36 FujiMonitor/1.0";
 
 const DEFAULT_SITE_PROBE_TARGETS: ProbeTarget[] = [
-  { name: "Стартовая страница", url: "https://fuji.ru/" },
-  { name: "Каталог", url: "https://fuji.ru/catalog/" },
-  { name: "Личный кабинет", url: "https://fuji.ru/personal/" },
-  { name: "Корзина", url: "https://fuji.ru/cart/" },
+  { name: "Стартовая страница", url: "https://fuji.ru/samara/" },
+  { name: "Каталог", url: "https://fuji.ru/samara/catalog/" },
+  { name: "Личный кабинет", url: "https://fuji.ru/samara/personal/" },
+  { name: "Корзина", url: "https://fuji.ru/samara/cart/" },
 ];
 
+// Приложение ru.fuji.app: Capacitor грузит оболочку app.fuji.ru, данные — с api-v3.fuji.ru
+// (найдено в JS-бандлах Nuxt-приложения, см. scripts/grep-all-bundles.sh)
 const DEFAULT_MOBILE_PROBE_TARGETS: ProbeTarget[] = [
   { name: "Запуск приложения", url: "https://app.fuji.ru/" },
-  { name: "Каталог", url: "https://app.fuji.ru/catalog" },
-  { name: "Поиск", url: "https://app.fuji.ru/search" },
-  { name: "Профиль", url: "https://app.fuji.ru/profile" },
+  {
+    name: "Каталог",
+    url: "https://api-v3.fuji.ru/api/v1/catalog",
+    headers: { accept: "application/json" },
+    requireOk: true,
+  },
+  {
+    name: "Город",
+    url: "https://api-v3.fuji.ru/api/v1/city",
+    headers: { accept: "application/json" },
+    requireOk: true,
+  },
+  {
+    name: "Истории",
+    url: "https://api-v3.fuji.ru/api/v1/story",
+    headers: { accept: "application/json" },
+    requireOk: true,
+  },
 ];
 
 function parseProbeTargets(envKey: string, fallback: ProbeTarget[]): ProbeTarget[] {
@@ -454,7 +478,16 @@ function parseProbeTargets(envKey: string, fallback: ProbeTarget[]): ProbeTarget
           const obj = item as Record<string, unknown>;
           const url = typeof obj.url === "string" ? obj.url.trim() : "";
           const name = typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : url;
-          if (url) return { name, url };
+          const headers =
+            obj.headers && typeof obj.headers === "object" && !Array.isArray(obj.headers)
+              ? Object.fromEntries(
+                  Object.entries(obj.headers as Record<string, unknown>).filter(
+                    ([, value]) => typeof value === "string",
+                  ),
+                )
+              : undefined;
+          const requireOk = obj.requireOk === true;
+          if (url) return { name, url, headers, requireOk: requireOk || undefined };
         }
         return null;
       })
@@ -467,18 +500,24 @@ function parseProbeTargets(envKey: string, fallback: ProbeTarget[]): ProbeTarget
 
 type ProbeSample = { ttfbMs: number; totalMs: number; ok: boolean; status: number };
 
-async function probeOnce(url: string, userAgent: string): Promise<ProbeSample> {
+async function probeOnce(
+  target: ProbeTarget,
+  userAgent: string,
+): Promise<ProbeSample> {
   const start = performance.now();
-  const response = await fetch(url, {
+  const response = await fetch(target.url, {
     redirect: "follow",
     cache: "no-store",
-    headers: { "user-agent": userAgent, accept: "*/*" },
+    headers: { "user-agent": userAgent, accept: "*/*", ...target.headers },
     signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
   });
   const ttfbMs = performance.now() - start;
   await response.arrayBuffer();
   const totalMs = performance.now() - start;
-  return { ttfbMs, totalMs, ok: response.ok || (response.status >= 300 && response.status < 400), status: response.status };
+  const ok = target.requireOk
+    ? response.ok
+    : response.ok || (response.status >= 300 && response.status < 400);
+  return { ttfbMs, totalMs, ok, status: response.status };
 }
 
 async function probeTarget(
@@ -490,7 +529,7 @@ async function probeTarget(
   let lastStatus = 0;
   for (let i = 0; i < PROBE_SAMPLES; i += 1) {
     try {
-      const sample = await probeOnce(target.url, userAgent);
+      const sample = await probeOnce(target, userAgent);
       lastStatus = sample.status;
       if (sample.ok) {
         ttfb.push(sample.ttfbMs);
@@ -588,7 +627,7 @@ export async function importSyntheticProbes(): Promise<{
   };
 
   const site = await runGroup(siteTargets, "site", "probe:site", PROBE_UA_SITE);
-  const mobile = await runGroup(mobileTargets, "mobile", "probe:app", PROBE_UA_MOBILE);
+  const mobile = await runGroup(mobileTargets, "mobile", "probe:ru.fuji.app", PROBE_UA_MOBILE);
 
   return { day, site, mobile, details };
 }
