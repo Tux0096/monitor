@@ -82,7 +82,11 @@ export type PerformanceHistoryReport = {
   metricName: string;
   pages: HistoryPageMetric[];
   fetchedAt: string;
+  from: string;
+  to: string;
 };
+
+type HistoryRange = { start: Date; end: Date; days: number };
 
 let sqlClient: postgres.Sql | null = null;
 
@@ -194,8 +198,15 @@ export async function importMissingPageSpeedDays(from: string, to: string, force
   return imported;
 }
 
-export async function readPerformanceHistoryReport(): Promise<PerformanceHistoryReport> {
+export async function readPerformanceHistoryReport(
+  from?: string,
+  to?: string,
+): Promise<PerformanceHistoryReport> {
   await ensurePerformanceHistorySchema();
+  const range = resolveHistoryRange(from, to);
+  // Тянем за период + предыдущий равный по длине период (для расчёта дельты).
+  const previousStart = addDays(range.start, -range.days);
+
   const rows = (await sql()`
     SELECT
       metric_name AS "metricName",
@@ -206,16 +217,35 @@ export async function readPerformanceHistoryReport(): Promise<PerformanceHistory
       avg_ms AS "avgMs",
       samples
     FROM firebase_performance_daily
-    WHERE day >= CURRENT_DATE - INTERVAL '30 days'
-      AND day <= CURRENT_DATE
+    WHERE day >= ${toDateString(previousStart)}
+      AND day <= ${toDateString(range.end)}
     ORDER BY day ASC
   `) as StoredPerformanceMetric[];
 
   return {
     metricName: "Performance",
-    pages: buildPageMetrics(rows),
+    pages: buildPageMetrics(rows, range),
     fetchedAt: new Date().toISOString(),
+    from: toDateString(range.start),
+    to: toDateString(range.end),
   };
+}
+
+function resolveHistoryRange(from?: string, to?: string): HistoryRange {
+  const today = startOfUtcDay(new Date());
+  const end =
+    to && !Number.isNaN(new Date(to).getTime()) ? startOfUtcDay(new Date(to)) : today;
+  const defaultStart = addDays(end, -29);
+  const startCandidate =
+    from && !Number.isNaN(new Date(from).getTime())
+      ? startOfUtcDay(new Date(from))
+      : defaultStart;
+  const start = startCandidate <= end ? startCandidate : end;
+  const days = Math.max(
+    1,
+    Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1,
+  );
+  return { start, end, days };
 }
 
 async function queryFirebasePerformanceDay(
@@ -633,10 +663,13 @@ function unionPerformanceTables(
     .join("\nUNION ALL\n");
 }
 
-function buildPageMetrics(rows: StoredPerformanceMetric[]): HistoryPageMetric[] {
-  const today = startOfUtcDay(new Date());
-  const currentStart = addDays(today, -30);
-  const previousStart = addDays(today, -60);
+function buildPageMetrics(
+  rows: StoredPerformanceMetric[],
+  range: HistoryRange,
+): HistoryPageMetric[] {
+  const { start, end, days } = range;
+  const previousStart = addDays(start, -days);
+  const previousEnd = addDays(start, -1);
   const pageKeys = Array.from(
     new Set(rows.map((row) => `${row.metricName}:${row.app}:${row.page}`)),
   );
@@ -648,11 +681,11 @@ function buildPageMetrics(rows: StoredPerformanceMetric[]): HistoryPageMetric[] 
       );
       const currentRows = pageRows.filter((row) => {
         const day = new Date(row.day);
-        return day >= currentStart && day <= today;
+        return day >= start && day <= end;
       });
       const previousRows = pageRows.filter((row) => {
         const day = new Date(row.day);
-        return day >= previousStart && day < currentStart;
+        return day >= previousStart && day <= previousEnd;
       });
       const currentMs = weightedAverage(currentRows);
       const previousMs = weightedAverage(previousRows);
@@ -670,8 +703,8 @@ function buildPageMetrics(rows: StoredPerformanceMetric[]): HistoryPageMetric[] 
             ? null
             : ((currentMs - previousMs) / previousMs) * 100,
         samples: currentRows.reduce((sum, row) => sum + row.samples, 0),
-        chart: buildChart(pageRows),
-        weekly: buildWeeklySummary(pageRows),
+        chart: buildChart(currentRows, range),
+        weekly: buildWeeklySummary(currentRows, range),
       };
     })
     .filter((row) => row.currentMs != null)
@@ -679,33 +712,47 @@ function buildPageMetrics(rows: StoredPerformanceMetric[]): HistoryPageMetric[] 
     .slice(0, 24);
 }
 
-function buildChart(rows: StoredPerformanceMetric[]): HistoryChartPoint[] {
-  const today = startOfUtcDay(new Date());
-  const currentStart = addDays(today, -29);
+function buildChart(
+  rows: StoredPerformanceMetric[],
+  range: HistoryRange,
+): HistoryChartPoint[] {
+  // Не больше 60 точек на графике — при длинных периодах агрегируем по «корзинам».
+  const maxPoints = 60;
+  const bucketSize = Math.max(1, Math.ceil(range.days / maxPoints));
+  const pointCount = Math.ceil(range.days / bucketSize);
 
-  return Array.from({ length: 30 }, (_, dayIndex) => {
-    const currentDay = addDays(currentStart, dayIndex);
+  return Array.from({ length: pointCount }, (_, pointIndex) => {
+    const bucketStart = addDays(range.start, pointIndex * bucketSize);
+    const bucketEndExclusive = addDays(bucketStart, bucketSize);
+    const bucketRows = rows.filter((row) => {
+      const day = new Date(row.day);
+      return day >= bucketStart && day < bucketEndExclusive;
+    });
     return {
-      dayIndex,
-      label: currentDay.toLocaleDateString("en-US", {
+      dayIndex: pointIndex,
+      label: bucketStart.toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
       }),
-      valueMs: weightedAverage(rows.filter((row) => sameDay(row.day, currentDay))),
+      valueMs: weightedAverage(bucketRows),
     };
   });
 }
 
-function buildWeeklySummary(rows: StoredPerformanceMetric[]): WeeklyMetricSummary[] {
-  const today = startOfUtcDay(new Date());
-  const start = addDays(today, -30);
+function buildWeeklySummary(
+  rows: StoredPerformanceMetric[],
+  range: HistoryRange,
+): WeeklyMetricSummary[] {
+  const { start, end, days } = range;
+  const weekCount = Math.max(1, Math.ceil(days / 7));
 
-  return Array.from({ length: 5 }, (_, weekIndex) => {
+  return Array.from({ length: weekCount }, (_, weekIndex) => {
     const weekStart = addDays(start, weekIndex * 7);
-    const weekEnd = weekIndex === 4 ? addDays(today, 1) : addDays(weekStart, 7);
+    const weekEndExclusive =
+      weekIndex === weekCount - 1 ? addDays(end, 1) : addDays(weekStart, 7);
     const weekRows = rows.filter((row) => {
       const day = new Date(row.day);
-      return day >= weekStart && day < weekEnd;
+      return day >= weekStart && day < weekEndExclusive;
     });
     const values = weekRows
       .map((row) => row.avgMs)
@@ -715,7 +762,7 @@ function buildWeeklySummary(rows: StoredPerformanceMetric[]): WeeklyMetricSummar
       label: `${weekStart.toLocaleDateString("ru-RU", {
         day: "2-digit",
         month: "2-digit",
-      })} - ${addDays(weekEnd, -1).toLocaleDateString("ru-RU", {
+      })} - ${addDays(weekEndExclusive, -1).toLocaleDateString("ru-RU", {
         day: "2-digit",
         month: "2-digit",
       })}`,

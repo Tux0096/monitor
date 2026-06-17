@@ -41,6 +41,8 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const [mobileSelectedKey, setMobileSelectedKey] = useState<string | null>(null);
   const [sitePage, setSitePage] = useState(1);
   const [mobilePage, setMobilePage] = useState(1);
+  const [monitorDateFrom, setMonitorDateFrom] = useState(() => defaultAppealsDateFrom());
+  const [monitorDateTo, setMonitorDateTo] = useState(() => defaultAppealsDateTo());
   const [appealRows, setAppealRows] = useState<AppealAnalyticsRow[]>([]);
   const [appealReport, setAppealReport] = useState<AppealsAnalyticsReport | null>(null);
   const [appealsDetailKey, setAppealsDetailKey] = useState<AppealsDetailKey | null>(null);
@@ -54,9 +56,14 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
 
     async function load() {
       try {
-        const response = await fetch("/api/firebase/performance/history", {
-          cache: "no-store",
-        });
+        const params = new URLSearchParams();
+        if (monitorDateFrom) params.set("from", monitorDateFrom);
+        if (monitorDateTo) params.set("to", monitorDateTo);
+        const query = params.toString();
+        const response = await fetch(
+          `/api/firebase/performance/history${query ? `?${query}` : ""}`,
+          { cache: "no-store" },
+        );
         const data = await readJson<PerformanceHistoryReport & ApiErrorPayload>(response);
 
         if (cancelled) return;
@@ -81,7 +88,7 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [session?.user]);
+  }, [session?.user, monitorDateFrom, monitorDateTo]);
 
   useEffect(() => {
     if (!session?.user) return;
@@ -180,6 +187,18 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
             expanded={siteExpanded}
             onToggle={() => setSiteExpanded((value) => !value)}
           >
+            <div className="mb-4">
+              <DateRangeFilter
+                dateFrom={monitorDateFrom}
+                dateTo={monitorDateTo}
+                onDateFromChange={setMonitorDateFrom}
+                onDateToChange={setMonitorDateTo}
+                onClear={() => {
+                  setMonitorDateFrom(defaultAppealsDateFrom());
+                  setMonitorDateTo(defaultAppealsDateTo());
+                }}
+              />
+            </div>
             <MonitoringMetricsGrid
               items={sitePages}
               selectedKey={selectedSite ? pageKey(selectedSite) : null}
@@ -210,6 +229,18 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
             expanded={mobileExpanded}
             onToggle={() => setMobileExpanded((value) => !value)}
           >
+            <div className="mb-4">
+              <DateRangeFilter
+                dateFrom={monitorDateFrom}
+                dateTo={monitorDateTo}
+                onDateFromChange={setMonitorDateFrom}
+                onDateToChange={setMonitorDateTo}
+                onClear={() => {
+                  setMonitorDateFrom(defaultAppealsDateFrom());
+                  setMonitorDateTo(defaultAppealsDateTo());
+                }}
+              />
+            </div>
             <MonitoringMetricsGrid
               items={mobilePages}
               selectedKey={selectedMobile ? pageKey(selectedMobile) : null}
@@ -513,7 +544,7 @@ function MetricDetailPanel({
       <h3 className="mt-2 text-2xl font-semibold text-white">{formatTime(item.currentMs)}</h3>
       <PerformanceChart points={item.chart} />
       <div className="mt-4 flex flex-wrap gap-8 text-sm">
-        <MetricLegend label="среднее за 30 дней" value={formatTime(item.currentMs)} color="bg-blue-400" />
+        <MetricLegend label="среднее за период" value={formatTime(item.currentMs)} color="bg-blue-400" />
         <MetricLegend label="сэмплы" value={String(item.samples)} color="bg-emerald-400" />
         {updatedAt ? (
           <MetricLegend
