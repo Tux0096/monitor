@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/Tux0096/monitor.git}"
 BRANCH="${BRANCH:-main}"
-SRC="${SRC:-/opt/monitor-src}"
+SRC="${SRC:-/opt/monitor/src}"
 APP="${APP:-/opt/monitor}"
 SUB="monitor-dashboard"
 PM2_APP="${PM2_APP:-monitor}"
