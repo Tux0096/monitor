@@ -18,6 +18,7 @@ type CourierAppeal = {
   status: AppealStatus;
   createdAt: string;
   shortText: string;
+  unreadCount: number;
 };
 
 type CourierMessage = {
@@ -185,8 +186,15 @@ export function CourierApp() {
   const [chatPhotoPreview, setChatPhotoPreview] = useState<string | null>(null);
   const [chatPhotoData, setChatPhotoData] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const prevUnreadTotalRef = useRef(0);
 
   const webApp = typeof window !== "undefined" ? window.WebApp : undefined;
+
+  const refreshBootstrap = useCallback(async (data: string) => {
+    const result = await postJson<Bootstrap>("/api/max/app/session", data);
+    setBootstrap(result);
+    return result;
+  }, []);
 
   const loadSession = useCallback(async (data: string) => {
     const result = await postJson<Bootstrap>("/api/max/app/session", data);
@@ -286,8 +294,21 @@ export function CourierApp() {
   }, [screen, goHome]);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [appealDetail?.messages.length, screen]);
+    if (screen !== "home" || !initData) return;
+    const interval = window.setInterval(() => {
+      void refreshBootstrap(initData).catch(() => undefined);
+    }, 15_000);
+    return () => window.clearInterval(interval);
+  }, [screen, initData, refreshBootstrap]);
+
+  useEffect(() => {
+    if (screen !== "home" || !bootstrap) return;
+    const total = bootstrap.appeals.reduce((sum, appeal) => sum + (appeal.unreadCount ?? 0), 0);
+    if (total > prevUnreadTotalRef.current && prevUnreadTotalRef.current > 0) {
+      void webApp?.HapticFeedback?.notificationOccurred("warning");
+    }
+    prevUnreadTotalRef.current = total;
+  }, [bootstrap, screen, webApp]);
 
   async function requestPhone() {
     const app = window.WebApp;
@@ -402,10 +423,15 @@ export function CourierApp() {
     }
   }
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [appealDetail?.messages.length, screen]);
+
   const profile = bootstrap?.profile;
   const appeals = bootstrap?.appeals ?? [];
   const activeAppeals = appeals.filter((a) => isActive(a.status));
   const historyAppeals = appeals.filter((a) => !isActive(a.status));
+  const unreadTotal = appeals.reduce((sum, appeal) => sum + (appeal.unreadCount ?? 0), 0);
 
   const shellClass =
     "min-h-dvh bg-[linear-gradient(180deg,#102820_0%,#0a1411_38%,#070b0a_100%)] text-zinc-50";
@@ -626,6 +652,13 @@ export function CourierApp() {
           Создать обращение
         </button>
 
+        {unreadTotal > 0 ? (
+          <div className="rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+            {unreadTotal} нов{unreadTotal === 1 ? "ое" : unreadTotal < 5 ? "ых" : "ых"} сообщени
+            {unreadTotal === 1 ? "е" : unreadTotal < 5 ? "я" : "й"} от оператора
+          </div>
+        ) : null}
+
         <AppealList title="Активные обращения" empty="Нет активных обращений" appeals={activeAppeals} onOpen={openAppeal} pending={pending} />
         <AppealList title="История" empty="История пуста" appeals={historyAppeals} onOpen={openAppeal} pending={pending} />
       </div>
@@ -663,7 +696,14 @@ function AppealList({
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-medium">№{appeal.appealNumber}</span>
-                  <span className="text-xs text-emerald-300/90">{statusLabel(appeal.status)}</span>
+                  <div className="flex items-center gap-2">
+                    {(appeal.unreadCount ?? 0) > 0 ? (
+                      <span className="rounded-full bg-sky-500 px-2 py-0.5 text-[10px] font-semibold text-white">
+                        {appeal.unreadCount}
+                      </span>
+                    ) : null}
+                    <span className="text-xs text-emerald-300/90">{statusLabel(appeal.status)}</span>
+                  </div>
                 </div>
                 <p className="mt-1 text-xs text-zinc-500">{formatDate(appeal.createdAt)}</p>
                 <p className="mt-2 text-sm text-zinc-300">{appeal.shortText}</p>

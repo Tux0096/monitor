@@ -83,6 +83,9 @@ export type Appeal = {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  courierLastReadAt: string | null;
+  operatorLastReadAt: string | null;
+  unreadCount: number;
   courierProfile: CourierProfile | null;
   messages: SupportMessage[];
   mergedAppeals: Appeal[];
@@ -253,6 +256,8 @@ async function migrateAppealsSchema() {
     ["operator_reply", "text"],
     ["duplicate_of", "integer"],
     ["merged_into_id", "uuid"],
+    ["courier_last_read_at", "timestamptz"],
+    ["operator_last_read_at", "timestamptz"],
   ]);
   await addColumns("courier_profiles", [
     ["display_name", "text"],
@@ -745,6 +750,7 @@ export type CourierMiniAppAppeal = {
   status: AppealStatus;
   createdAt: string;
   shortText: string;
+  unreadCount: number;
 };
 
 export type CourierMiniAppMessage = {
@@ -778,6 +784,54 @@ function toCourierMiniAppProfile(profile: CourierProfile): CourierMiniAppProfile
   };
 }
 
+function countUnreadForCourier(appeal: Appeal) {
+  const since = appeal.courierLastReadAt
+    ? new Date(appeal.courierLastReadAt).getTime()
+    : 0;
+  return appeal.messages.filter((message) => {
+    if (message.direction === "in") return false;
+    return new Date(message.createdAt).getTime() > since;
+  }).length;
+}
+
+function countUnreadForOperator(appeal: Appeal) {
+  const since = appeal.operatorLastReadAt
+    ? new Date(appeal.operatorLastReadAt).getTime()
+    : 0;
+  return appeal.messages.filter((message) => {
+    if (message.direction !== "in") return false;
+    return new Date(message.createdAt).getTime() > since;
+  }).length;
+}
+
+function attachUnreadCounts(appeals: Appeal[], role: "courier" | "operator") {
+  for (const appeal of appeals) {
+    appeal.unreadCount =
+      role === "courier" ? countUnreadForCourier(appeal) : countUnreadForOperator(appeal);
+  }
+}
+
+export async function markAppealReadByCourier(appealId: string, maxUserId: string, phone?: string | null) {
+  const appeal = await getCourierOwnedAppeal(maxUserId, appealId, phone);
+  if (!appeal) return false;
+  await sql()`
+    UPDATE support_appeals
+    SET courier_last_read_at = now(), updated_at = updated_at
+    WHERE id = ${appealId}
+  `;
+  return true;
+}
+
+export async function markAppealReadByOperator(appealId: string) {
+  await ensureAppealsSchema();
+  await sql()`
+    UPDATE support_appeals
+    SET operator_last_read_at = now(), updated_at = updated_at
+    WHERE id = ${appealId}
+  `;
+  return getAppeal(appealId);
+}
+
 function toCourierMiniAppAppeal(appeal: Appeal): CourierMiniAppAppeal {
   const problemLine =
     appeal.issueText
@@ -790,6 +844,7 @@ function toCourierMiniAppAppeal(appeal: Appeal): CourierMiniAppAppeal {
     status: appeal.status,
     createdAt: appeal.createdAt,
     shortText: shorten(oneLine(problemLine), 80),
+    unreadCount: countUnreadForCourier(appeal),
   };
 }
 
@@ -848,6 +903,8 @@ export async function listCourierMiniAppAppeals(
   limit = 30,
 ): Promise<CourierMiniAppAppeal[]> {
   const appeals = await listCourierAppealsForBot(maxUserId, phone, limit);
+  await attachMessages(appeals);
+  attachUnreadCounts(appeals, "courier");
   return appeals.map(toCourierMiniAppAppeal);
 }
 
@@ -858,6 +915,13 @@ export async function getCourierMiniAppAppealDetail(
 ): Promise<CourierMiniAppAppealDetail | null> {
   const appeal = await getCourierOwnedAppeal(maxUserId, appealId, phone);
   if (!appeal) return null;
+  await sql()`
+    UPDATE support_appeals
+    SET courier_last_read_at = now(), updated_at = updated_at
+    WHERE id = ${appealId}
+  `;
+  appeal.courierLastReadAt = new Date().toISOString();
+  attachUnreadCounts([appeal], "courier");
   return {
     ...toCourierMiniAppAppeal(appeal),
     photoUrl: appeal.photoUrl,
@@ -929,7 +993,7 @@ export async function getCourierMiniAppBootstrap(
   const needsPhone = !profile.phone;
   const appeals = needsPhone
     ? []
-    : (await listCourierAppealsForBot(maxUserId, profile.phone, 30)).map(toCourierMiniAppAppeal);
+    : await listCourierMiniAppAppeals(maxUserId, profile.phone, 30);
   return {
     needsPhone,
     profile: toCourierMiniAppProfile(profile),
@@ -954,7 +1018,7 @@ export async function bindCourierPhoneFromMiniApp(
     os: existing?.os,
     appVersion: existing?.appVersion,
   });
-  const appeals = (await listCourierAppealsForBot(maxUserId, profile.phone, 30)).map(toCourierMiniAppAppeal);
+  const appeals = await listCourierMiniAppAppeals(maxUserId, profile.phone, 30);
   return {
     needsPhone: false,
     profile: toCourierMiniAppProfile(profile),
@@ -1186,6 +1250,7 @@ export async function listAppeals(status?: string): Promise<Appeal[]> {
   const appeals = rows.map(toAppeal);
   await attachMessages(appeals);
   await attachMergedAppeals(appeals);
+  attachUnreadCounts(appeals, "operator");
   return appeals;
 }
 
@@ -1210,6 +1275,7 @@ export async function getAppeal(id: string): Promise<Appeal | null> {
   const appeal = toAppeal(rows[0]);
   await attachMessages([appeal]);
   await attachMergedAppeals([appeal]);
+  attachUnreadCounts([appeal], "operator");
   return appeal;
 }
 
@@ -1304,7 +1370,7 @@ export async function addOperatorReply(id: string, text: string) {
   });
   await sql()`
     UPDATE support_appeals
-    SET operator_reply = ${text}, updated_at = now()
+    SET operator_reply = ${text}, operator_last_read_at = now(), updated_at = now()
     WHERE id = ${id}
   `;
   await ingestOperatorReply(toLearningInput(appeal), text);
@@ -2197,6 +2263,13 @@ function toAppeal(row: postgres.Row): Appeal {
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
     closedAt: row.closed_at ? new Date(row.closed_at as string).toISOString() : null,
+    courierLastReadAt: row.courier_last_read_at
+      ? new Date(row.courier_last_read_at as string).toISOString()
+      : null,
+    operatorLastReadAt: row.operator_last_read_at
+      ? new Date(row.operator_last_read_at as string).toISOString()
+      : null,
+    unreadCount: 0,
     courierProfile: row.courier_profile ? toCourierProfile(row.courier_profile as postgres.Row) : null,
     messages: [],
     mergedAppeals: [],

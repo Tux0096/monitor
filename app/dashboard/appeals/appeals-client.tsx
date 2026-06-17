@@ -39,7 +39,9 @@ export function AppealsClient() {
   const [courierDrafts, setCourierDrafts] = useState<Record<string, CourierDraft>>({});
   const [appealDrafts, setAppealDrafts] = useState<Record<string, AppealDraft>>({});
   const [mergeSelection, setMergeSelection] = useState<Record<string, boolean>>({});
+  const [mergePrimaryId, setMergePrimaryId] = useState<string | null>(null);
   const [mergeMode, setMergeMode] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<SupportCategory[]>([]);
   const [dateFrom, setDateFrom] = useState("");
@@ -50,6 +52,8 @@ export function AppealsClient() {
 
   useEffect(() => {
     void loadAppeals();
+    const interval = window.setInterval(() => void loadAppeals({ silent: true }), 15_000);
+    return () => window.clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -62,14 +66,22 @@ export function AppealsClient() {
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, []);
 
+  useEffect(() => {
+    if (!expandedId) return;
+    const appeal = appeals.find((item) => item.id === expandedId);
+    if (appeal && (appeal.unreadCount ?? 0) > 0) {
+      void markAppealRead(expandedId);
+    }
+  }, [expandedId, appeals]);
+
   function toggleCategory(key: SupportCategory) {
     setSelectedCategories((current) =>
       current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
     );
   }
 
-  async function loadAppeals() {
-    setLoading(true);
+  async function loadAppeals(options?: { silent?: boolean }) {
+    if (!options?.silent) setLoading(true);
     try {
       const response = await fetch("/api/appeals?status=all", { cache: "no-store" });
       if (!response.ok) return;
@@ -90,8 +102,25 @@ export function AppealsClient() {
         return next;
       });
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
+  }
+
+  async function markAppealRead(id: string) {
+    const response = await fetch(`/api/appeals/${id}/read`, { method: "POST" });
+    if (response.ok) {
+      setAppeals((current) =>
+        current.map((appeal) => (appeal.id === id ? { ...appeal, unreadCount: 0 } : appeal)),
+      );
+    }
+  }
+
+  function toggleExpanded(id: string) {
+    setExpandedId((current) => {
+      const next = current === id ? null : id;
+      if (next) void markAppealRead(next);
+      return next;
+    });
   }
 
   async function sendReply(id: string, close = false) {
@@ -142,8 +171,12 @@ export function AppealsClient() {
     const selectedIds = Object.entries(mergeSelection)
       .filter(([id, checked]) => checked && id !== primary.id)
       .map(([id]) => id);
-    if (selectedIds.length === 0) return;
+    if (selectedIds.length === 0) {
+      setMergeError("Отметьте хотя бы одно обращение для объединения");
+      return;
+    }
 
+    setMergeError(null);
     const response = await fetch(`/api/appeals/${primary.id}/merge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -151,9 +184,31 @@ export function AppealsClient() {
     });
     if (response.ok) {
       setMergeSelection({});
+      setMergePrimaryId(null);
       setMergeMode(false);
+      setMergeError(null);
       await loadAppeals();
+    } else {
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      setMergeError(data?.error ?? "Не удалось объединить обращения");
     }
+  }
+
+  function exitMergeMode() {
+    setMergeMode(false);
+    setMergeSelection({});
+    setMergePrimaryId(null);
+    setMergeError(null);
+  }
+
+  function setMergePrimary(id: string) {
+    setMergePrimaryId(id);
+    setMergeSelection((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setMergeError(null);
   }
 
   async function saveCourier(appeal: Appeal) {
@@ -232,20 +287,36 @@ export function AppealsClient() {
   const openCount = baseFilteredAppeals.filter((a) => a.status !== "closed").length;
   const closedCount = baseFilteredAppeals.filter((a) => a.status === "closed").length;
   const totalCount = baseFilteredAppeals.length;
+  const unreadTotal = baseFilteredAppeals.reduce((sum, appeal) => sum + (appeal.unreadCount ?? 0), 0);
+  const mergeSecondaryCount = Object.entries(mergeSelection).filter(
+    ([id, checked]) => checked && id !== mergePrimaryId,
+  ).length;
+  const mergePrimary = mergePrimaryId
+    ? visibleAppeals.find((appeal) => appeal.id === mergePrimaryId) ??
+      appeals.find((appeal) => appeal.id === mergePrimaryId) ??
+      null
+    : null;
 
   return (
-    <main className="mx-auto max-w-7xl px-4 py-8">
+    <main className={`mx-auto max-w-7xl px-4 py-8 ${mergeMode ? "pb-28" : ""}`}>
       <Header
         courierFilter={courierFilter}
         mergeMode={mergeMode}
+        unreadTotal={unreadTotal}
         onToggleMergeMode={() => {
-          setMergeMode((value) => !value);
-          setMergeSelection({});
+          if (mergeMode) {
+            exitMergeMode();
+          } else {
+            setMergeMode(true);
+            setMergeSelection({});
+            setMergePrimaryId(null);
+            setMergeError(null);
+          }
         }}
         onRefresh={() => void loadAppeals()}
       />
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <SummaryCard
           label="Открытые"
           value={openCount}
@@ -263,6 +334,18 @@ export function AppealsClient() {
           value={totalCount}
           active={statusFilter === "all"}
           onClick={() => setStatusFilter("all")}
+        />
+        <SummaryCard
+          label="Новые сообщения"
+          value={unreadTotal}
+          active={false}
+          highlight={unreadTotal > 0}
+          onClick={() => {
+            if (unreadTotal > 0) {
+              const firstUnread = visibleAppeals.find((appeal) => (appeal.unreadCount ?? 0) > 0);
+              if (firstUnread) toggleExpanded(firstUnread.id);
+            }
+          }}
         />
       </div>
 
@@ -315,23 +398,38 @@ export function AppealsClient() {
                 >
                   <button
                     type="button"
-                    onClick={() => setExpandedId(expanded ? null : appeal.id)}
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-900"
+                    onClick={() => toggleExpanded(appeal.id)}
+                    className={`flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-900 ${
+                      (appeal.unreadCount ?? 0) > 0 ? "bg-sky-500/5" : ""
+                    }`}
                   >
                     {mergeMode ? (
-                      <input
-                        type="checkbox"
-                        checked={Boolean(mergeSelection[appeal.id])}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          setMergeSelection((current) => ({
-                            ...current,
-                            [appeal.id]: event.target.checked,
-                          }));
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        className="rounded border-zinc-600 bg-zinc-900 text-sky-500"
-                      />
+                      <div className="flex shrink-0 flex-col items-center gap-2" onClick={(event) => event.stopPropagation()}>
+                        <label className="flex items-center gap-1 text-[10px] text-violet-300" title="Главное обращение">
+                          <input
+                            type="radio"
+                            name="merge-primary"
+                            checked={mergePrimaryId === appeal.id}
+                            onChange={() => setMergePrimary(appeal.id)}
+                            className="text-violet-500"
+                          />
+                          главное
+                        </label>
+                        <input
+                          type="checkbox"
+                          disabled={mergePrimaryId === appeal.id}
+                          checked={Boolean(mergeSelection[appeal.id])}
+                          onChange={(event) => {
+                            setMergeSelection((current) => ({
+                              ...current,
+                              [appeal.id]: event.target.checked,
+                            }));
+                            setMergeError(null);
+                          }}
+                          title="Добавить в объединение"
+                          className="rounded border-zinc-600 bg-zinc-900 text-violet-500 disabled:opacity-30"
+                        />
+                      </div>
                     ) : null}
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
@@ -350,6 +448,11 @@ export function AppealsClient() {
                           }}
                         />
                         <StatusBadge appeal={appeal} />
+                        {(appeal.unreadCount ?? 0) > 0 ? (
+                          <span className="rounded-full bg-sky-500 px-2 py-0.5 text-xs font-medium text-white">
+                            {appeal.unreadCount} нов.
+                          </span>
+                        ) : null}
                         {appeal.mergedAppeals.length > 0 ? (
                           <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-200">
                             контур · {appeal.mergedAppeals.length + 1}
@@ -417,7 +520,9 @@ export function AppealsClient() {
                           {mergeMode ? (
                             <MergePanel
                               primary={appeal}
-                              selectedCount={Object.values(mergeSelection).filter(Boolean).length}
+                              isPrimary={mergePrimaryId === appeal.id}
+                              selectedCount={mergeSecondaryCount}
+                              onSetPrimary={() => setMergePrimary(appeal.id)}
                               onMerge={() => void mergeInto(appeal)}
                             />
                           ) : null}
@@ -440,6 +545,19 @@ export function AppealsClient() {
           </div>
         )}
       </section>
+
+      {mergeMode ? (
+        <MergeToolbar
+          primary={mergePrimary}
+          secondaryCount={mergeSecondaryCount}
+          error={mergeError}
+          onCancel={exitMergeMode}
+          onMerge={() => {
+            if (mergePrimary) void mergeInto(mergePrimary);
+            else setMergeError("Выберите главное обращение (радиокнопка)");
+          }}
+        />
+      ) : null}
     </main>
   );
 }
@@ -447,11 +565,13 @@ export function AppealsClient() {
 function Header({
   courierFilter,
   mergeMode,
+  unreadTotal,
   onToggleMergeMode,
   onRefresh,
 }: {
   courierFilter: string | null;
   mergeMode: boolean;
+  unreadTotal: number;
   onToggleMergeMode: () => void;
   onRefresh: () => void;
 }) {
@@ -460,6 +580,12 @@ function Header({
       <div>
         <p className="text-xs text-zinc-600">MAX · обращения курьеров</p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Обращения</h1>
+        {unreadTotal > 0 ? (
+          <p className="mt-2 text-sm text-sky-300">
+            {unreadTotal} нов{unreadTotal === 1 ? "ое" : unreadTotal < 5 ? "ых" : "ых"} сообщени
+            {unreadTotal === 1 ? "е" : unreadTotal < 5 ? "я" : "й"} от курьеров
+          </p>
+        ) : null}
         {courierFilter ? (
           <p className="mt-2 text-xs text-zinc-500">
             Фильтр по курьеру: {courierFilter}
@@ -784,30 +910,91 @@ function MergedContour({ appeals }: { appeals: Appeal[] }) {
   );
 }
 
+function MergeToolbar({
+  primary,
+  secondaryCount,
+  error,
+  onCancel,
+  onMerge,
+}: {
+  primary: Appeal | null;
+  secondaryCount: number;
+  error: string | null;
+  onCancel: () => void;
+  onMerge: () => void;
+}) {
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-30 border-t border-violet-500/30 bg-zinc-950/95 px-4 py-4 backdrop-blur">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-violet-100">Объединение обращений</div>
+          <p className="mt-1 text-xs text-violet-100/80">
+            {primary
+              ? `Главное: №${primary.appealNumber} · к объединению: ${secondaryCount}`
+              : "Выберите главное обращение радиокнопкой, дубли — чекбоксами"}
+          </p>
+          {error ? <p className="mt-1 text-xs text-rose-300">{error}</p> : null}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            disabled={!primary || secondaryCount === 0}
+            onClick={onMerge}
+            className="rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
+          >
+            Объединить ({secondaryCount})
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MergePanel({
   primary,
+  isPrimary,
   selectedCount,
+  onSetPrimary,
   onMerge,
 }: {
   primary: Appeal;
+  isPrimary: boolean;
   selectedCount: number;
+  onSetPrimary: () => void;
   onMerge: () => void;
 }) {
   return (
     <div className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3">
       <div className="text-sm font-medium text-violet-100">Объединение в контур</div>
       <p className="mt-2 text-xs text-violet-100/80">
-        Отметьте другие обращения чекбоксами в списке и объедините их с №{primary.appealNumber}.
-        История и сообщения перейдут сюда, вторичные обращения будут закрыты.
+        Отметьте дубли чекбоксами в списке. Главное обращение — радиокнопка; в него перейдут история и
+        сообщения, вторичные будут закрыты.
       </p>
-      <button
-        type="button"
-        disabled={selectedCount === 0}
-        onClick={onMerge}
-        className="mt-3 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
-      >
-        Объединить выбранные ({selectedCount})
-      </button>
+      {!isPrimary ? (
+        <button
+          type="button"
+          onClick={onSetPrimary}
+          className="mt-3 rounded-lg border border-violet-400/40 px-3 py-2 text-sm text-violet-100"
+        >
+          Сделать №{primary.appealNumber} главным
+        </button>
+      ) : (
+        <button
+          type="button"
+          disabled={selectedCount === 0}
+          onClick={onMerge}
+          className="mt-3 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
+        >
+          Объединить выбранные ({selectedCount})
+        </button>
+      )}
     </div>
   );
 }
@@ -972,11 +1159,13 @@ function SummaryCard({
   label,
   value,
   active,
+  highlight,
   onClick,
 }: {
   label: string;
   value: number;
   active: boolean;
+  highlight?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -986,10 +1175,12 @@ function SummaryCard({
       className={
         active
           ? "rounded-xl border border-sky-400/50 bg-sky-500/10 p-4 text-left transition hover:border-sky-400/70"
-          : "rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-left transition hover:border-zinc-600"
+          : highlight
+            ? "rounded-xl border border-sky-400/40 bg-sky-500/10 p-4 text-left transition hover:border-sky-400/60"
+            : "rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-left transition hover:border-zinc-600"
       }
     >
-      <div className="text-2xl font-semibold text-white">{value}</div>
+      <div className={`text-2xl font-semibold ${highlight ? "text-sky-300" : "text-white"}`}>{value}</div>
       <div className="mt-1 text-xs text-zinc-500">{label}</div>
     </button>
   );
