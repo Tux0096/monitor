@@ -7,7 +7,6 @@ REPO_URL="${REPO_URL:-https://github.com/Tux0096/monitor.git}"
 BRANCH="${BRANCH:-main}"
 SRC="${SRC:-/opt/monitor/src}"
 APP="${APP:-/opt/monitor}"
-SUB="monitor-dashboard"
 PM2_APP="${PM2_APP:-monitor}"
 
 PORT="$(grep '^MONITOR_PORT=' "${APP}/.env.local" 2>/dev/null | cut -d= -f2- | tr -d '\r' | tr -d ' ')"
@@ -29,7 +28,7 @@ if [ "${LOCAL}" = "${REMOTE}" ] && [ "${FORCE:-0}" != "1" ]; then
 fi
 git reset --hard "origin/${BRANCH}"
 
-cd "${SRC}/${SUB}"
+cd "${SRC}"
 echo "==> npm ci"
 npm ci --no-audit --no-fund
 echo "==> build"
