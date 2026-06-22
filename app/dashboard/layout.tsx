@@ -44,6 +44,12 @@ export default async function DashboardLayout({
             >
               Точки
             </Link>
+            <Link
+              href="/dashboard/temperature"
+              className="rounded-lg px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900 hover:text-white"
+            >
+              Мониторинг температуры
+            </Link>
           </nav>
           <div className="mt-6 truncate text-xs text-zinc-600">
             {session.user.email ?? session.user.name}
