@@ -28,6 +28,8 @@ deploy_bundle.tar.gz
 deploy_bundle_*.tar.gz
 infra_bundle.tar.gz
 .cursor/
+!.cursor/rules/
+!.cursor/rules/**
 docker-compose.production
 scripts/docker-compose.production
 scripts/deploy.env

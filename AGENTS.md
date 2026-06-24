@@ -2,6 +2,17 @@
 
 Читай этот файл **перед** любыми изменениями backend или инфраструктуры.
 
+## Онлайн-режим (обязательно)
+
+- Работать **только онлайн**: SSH → `/opt/monitor/src`, деплой на сервере.
+- **Не** править и не деплоить `fuji_stat` / `stat.franchise-fuji.ru` — устаревший MVP.
+- **Не** собирать на ПК пользователя, если он явно не попросил.
+- GitHub: аккаунт **`Tux0096`**, репозиторий **`Tux0096/monitor`**.
+- Прод: **https://it.franchise-fuji.ru/dashboard/appeals**
+- Деплой: `bash /opt/monitor/scripts/server-git-deploy.sh`
+- MAX webhook: `bash /opt/monitor/scripts/server-max-subscribe.sh`
+- Подробно: **`docs/ONLINE_WORKFLOW.md`**
+
 ## Обязательно
 
 1. **Микросервисы** — не добавляй бизнес-логику и SQL в `app/` (Next.js). Новый функционал → новый или существующий сервис в `services/`.
