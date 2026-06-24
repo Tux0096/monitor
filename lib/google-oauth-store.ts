@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { getRuntimeEnv } from "@/lib/runtime-env";
 
 export type StoredGoogleOAuth = {
   clientId?: string;
@@ -10,10 +11,7 @@ export type StoredGoogleOAuth = {
 };
 
 export function googleOAuthFilePath(): string {
-  return (
-    process.env.GOOGLE_OAUTH_TOKEN_FILE?.trim() ||
-    "/opt/monitor/secrets/google-oauth.json"
-  );
+  return getRuntimeEnv("GOOGLE_OAUTH_TOKEN_FILE") || "/opt/monitor/secrets/google-oauth.json";
 }
 
 export async function readStoredGoogleOAuth(): Promise<StoredGoogleOAuth> {
@@ -45,11 +43,9 @@ export async function writeStoredGoogleOAuth(
 export async function getGoogleOAuthCredentials() {
   const stored = await readStoredGoogleOAuth();
   return {
-    clientId: process.env.GOOGLE_CLIENT_ID?.trim() || stored.clientId,
-    clientSecret:
-      process.env.GOOGLE_CLIENT_SECRET?.trim() || stored.clientSecret,
-    refreshToken:
-      process.env.GOOGLE_REFRESH_TOKEN?.trim() || stored.refreshToken,
+    clientId: getRuntimeEnv("GOOGLE_CLIENT_ID") || stored.clientId,
+    clientSecret: getRuntimeEnv("GOOGLE_CLIENT_SECRET") || stored.clientSecret,
+    refreshToken: getRuntimeEnv("GOOGLE_REFRESH_TOKEN") || stored.refreshToken,
     email: stored.email,
     updatedAt: stored.updatedAt,
   };

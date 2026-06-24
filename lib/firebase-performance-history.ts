@@ -42,9 +42,11 @@ type PageSpeedResponse = {
 
 type GoogleAuthClient = ResolvedGoogleAuth["auth"];
 
+export type PerformanceSourceType = "site" | "mobile" | "mobile_api";
+
 export type StoredPerformanceMetric = {
   metricName: string;
-  sourceType: "site" | "mobile";
+  sourceType: PerformanceSourceType;
   app: string;
   page: string;
   day: string;
@@ -70,7 +72,7 @@ export type HistoryPageMetric = {
   metricName: string;
   app: string;
   page: string;
-  sourceType: "site" | "mobile";
+  sourceType: PerformanceSourceType;
   currentMs: number | null;
   previousMs: number | null;
   deltaPercent: number | null;
@@ -223,9 +225,11 @@ export async function readPerformanceHistoryReport(
     ORDER BY day ASC
   `) as StoredPerformanceMetric[];
 
+  const filteredRows = rows.filter((row) => !isStaleSiteProbePage(row));
+
   return {
     metricName: "Performance",
-    pages: buildPageMetrics(rows, range),
+    pages: buildPageMetrics(filteredRows, range),
     fetchedAt: new Date().toISOString(),
     from: toDateString(range.start),
     to: toDateString(range.end),
@@ -442,24 +446,23 @@ const DEFAULT_SITE_PROBE_TARGETS: ProbeTarget[] = [
   { name: "Корзина", url: "https://fuji.ru/samara/cart/" },
 ];
 
-// Приложение ru.fuji.app: Capacitor грузит оболочку app.fuji.ru, данные — с api-v3.fuji.ru
-// (найдено в JS-бандлах Nuxt-приложения, см. scripts/grep-all-bundles.sh)
-const DEFAULT_MOBILE_PROBE_TARGETS: ProbeTarget[] = [
+// Оболочка приложения (HTML) и JSON API — синтетические пробы, не Firebase Performance.
+const DEFAULT_MOBILE_API_PROBE_TARGETS: ProbeTarget[] = [
   { name: "Запуск приложения", url: "https://app.fuji.ru/" },
   {
-    name: "Каталог",
+    name: "Каталог (API)",
     url: "https://api-v3.fuji.ru/api/v1/catalog",
     headers: { accept: "application/json" },
     requireOk: true,
   },
   {
-    name: "Город",
+    name: "Город (API)",
     url: "https://api-v3.fuji.ru/api/v1/city",
     headers: { accept: "application/json" },
     requireOk: true,
   },
   {
-    name: "Истории",
+    name: "Истории (API)",
     url: "https://api-v3.fuji.ru/api/v1/story",
     headers: { accept: "application/json" },
     requireOk: true,
@@ -574,13 +577,16 @@ async function upsertProbeRow(row: StoredPerformanceMetric) {
 export async function importSyntheticProbes(): Promise<{
   day: string;
   site: number;
-  mobile: number;
+  mobileApi: number;
   details: Array<{ group: string; name: string; totalMs: number | null; samples: number; status: number }>;
 }> {
   await ensurePerformanceHistorySchema();
   const day = toDateString(startOfUtcDay(new Date()));
   const siteTargets = parseProbeTargets("SITE_PROBE_TARGETS", DEFAULT_SITE_PROBE_TARGETS);
-  const mobileTargets = parseProbeTargets("MOBILE_PROBE_TARGETS", DEFAULT_MOBILE_PROBE_TARGETS);
+  const mobileApiTargets = parseProbeTargets(
+    "MOBILE_PROBE_TARGETS",
+    DEFAULT_MOBILE_API_PROBE_TARGETS,
+  );
   const details: Array<{
     group: string;
     name: string;
@@ -591,7 +597,7 @@ export async function importSyntheticProbes(): Promise<{
 
   const runGroup = async (
     targets: ProbeTarget[],
-    sourceType: "site" | "mobile",
+    sourceType: PerformanceSourceType,
     app: string,
     userAgent: string,
   ) => {
@@ -631,9 +637,26 @@ export async function importSyntheticProbes(): Promise<{
   };
 
   const site = await runGroup(siteTargets, "site", "probe:site", PROBE_UA_SITE);
-  const mobile = await runGroup(mobileTargets, "mobile", "probe:ru.fuji.app", PROBE_UA_MOBILE);
+  const mobileApi = await runGroup(
+    mobileApiTargets,
+    "mobile_api",
+    "probe:ru.fuji.app",
+    PROBE_UA_MOBILE,
+  );
 
-  return { day, site, mobile, details };
+  return { day, site, mobileApi, details };
+}
+
+/** Устаревшие пробы без /samara/ — дублируют актуальные URL и дают 1 точку на графике. */
+function isStaleSiteProbePage(row: StoredPerformanceMetric): boolean {
+  if (row.sourceType !== "site" || row.app !== "probe:site") return false;
+  try {
+    const url = new URL(row.page);
+    if (url.hostname !== "fuji.ru") return false;
+    return !url.pathname.startsWith("/samara");
+  } catch {
+    return false;
+  }
 }
 
 function mapBigQueryRows(res: { data: { rows?: Array<{ f?: Array<{ v?: unknown }> }> | null; schema?: { fields?: Array<{ name?: string | null }> | null } | null } }) {

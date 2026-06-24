@@ -52,9 +52,11 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [siteExpanded, setSiteExpanded] = useState(false);
   const [mobileExpanded, setMobileExpanded] = useState(false);
+  const [mobileApiExpanded, setMobileApiExpanded] = useState(false);
   const [appealsExpanded, setAppealsExpanded] = useState(false);
   const [siteSelectedKey, setSiteSelectedKey] = useState<string | null>(null);
   const [mobileSelectedKey, setMobileSelectedKey] = useState<string | null>(null);
+  const [mobileApiSelectedKey, setMobileApiSelectedKey] = useState<string | null>(null);
   const [monitorDateFrom, setMonitorDateFrom] = useState(() => defaultAppealsDateFrom());
   const [monitorDateTo, setMonitorDateTo] = useState(() => defaultAppealsDateTo());
   const [appealRows, setAppealRows] = useState<AppealAnalyticsRow[]>([]);
@@ -192,10 +194,15 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
 
   const sitePages = (report?.pages ?? []).filter((page) => page.sourceType === "site");
   const mobilePages = (report?.pages ?? []).filter((page) => page.sourceType === "mobile");
+  const mobileApiPages = (report?.pages ?? []).filter((page) => page.sourceType === "mobile_api");
   const selectedSite =
     sitePages.find((page) => pageKey(page) === siteSelectedKey) ?? sitePages[0] ?? null;
   const selectedMobile =
     mobilePages.find((page) => pageKey(page) === mobileSelectedKey) ?? mobilePages[0] ?? null;
+  const selectedMobileApi =
+    mobileApiPages.find((page) => pageKey(page) === mobileApiSelectedKey) ??
+    mobileApiPages[0] ??
+    null;
 
   const appealsSummary = useMemo(
     () => summarizeAppeals(appealRows, appealReport),
@@ -319,7 +326,54 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
             ) : loading && !report ? (
               <ChartSkeleton compact />
             ) : mobilePages.length === 0 ? (
-              <EmptyHint text="Данные готовятся. Показатели появятся после первой загрузки." />
+              <EmptyHint text="Нет данных Firebase Performance. Загрузите ключ сервисного аккаунта на сервер (см. FIREBASE_SETUP.md) и запустите импорт." />
+            ) : null}
+          </ExpandableCard>
+
+          <ExpandableCard
+            title="Доступность API приложения"
+            summary={`${mobileApiPages.length} показателей · синтетические HTTP-пробы${updatedAt ? ` · обновлено ${new Date(updatedAt).toLocaleTimeString("ru-RU")}` : ""}`}
+            badge={
+              mobileApiPages.length > 0 ? (
+                <SlowMetricsBadge count={countSlowMetrics(mobileApiPages)} />
+              ) : null
+            }
+            expanded={mobileApiExpanded}
+            onToggle={() => setMobileApiExpanded((value) => !value)}
+          >
+            <p className="mb-4 text-xs text-zinc-500">
+              Время отклика JSON API и оболочки app.fuji.ru с сервера мониторинга. Это не UX
+              приложения на устройстве — для реальной скорости см. блок выше (Firebase Performance).
+            </p>
+            <MonitoringAlertsBar
+              slowCount={countSlowMetrics(mobileApiPages)}
+              notifyEnabled={notifyEnabled}
+              onEnableNotifications={() => void enableBrowserNotifications()}
+            />
+            <div className="mb-4">
+              <DateRangeFilter
+                dateFrom={monitorDateFrom}
+                dateTo={monitorDateTo}
+                onDateFromChange={setMonitorDateFrom}
+                onDateToChange={setMonitorDateTo}
+                onClear={() => {
+                  setMonitorDateFrom(defaultAppealsDateFrom());
+                  setMonitorDateTo(defaultAppealsDateTo());
+                }}
+              />
+            </div>
+            <MonitoringMetricsGrid
+              items={mobileApiPages}
+              selectedKey={selectedMobileApi ? pageKey(selectedMobileApi) : null}
+              onSelect={setMobileApiSelectedKey}
+              loading={loading && !report}
+            />
+            {selectedMobileApi ? (
+              <MetricDetailPanel item={selectedMobileApi} updatedAt={updatedAt} />
+            ) : loading && !report ? (
+              <ChartSkeleton compact />
+            ) : mobileApiPages.length === 0 ? (
+              <EmptyHint text="Данные готовятся. Показатели появятся после первой пробы (каждые 10 минут)." />
             ) : null}
           </ExpandableCard>
 

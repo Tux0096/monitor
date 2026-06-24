@@ -1,6 +1,7 @@
 import { google } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
 import { getGoogleOAuthCredentials } from "@/lib/google-oauth-store";
+import { getRuntimeEnv } from "@/lib/runtime-env";
 import { access } from "node:fs/promises";
 
 const GOOGLE_API_SCOPES = [
@@ -18,7 +19,7 @@ export type ResolvedGoogleAuth = {
 };
 
 function parseServiceAccountJson(): object | null {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
+  const raw = getRuntimeEnv("GOOGLE_SERVICE_ACCOUNT_JSON");
   if (!raw) return null;
   try {
     return JSON.parse(raw) as object;
@@ -32,7 +33,7 @@ export async function resolveGoogleApiAuth(
   userAccessToken?: string,
 ): Promise<ResolvedGoogleAuth | { auth: null; source: "none" }> {
   const credentials = parseServiceAccountJson();
-  const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_FILE?.trim();
+  const keyFile = getRuntimeEnv("GOOGLE_SERVICE_ACCOUNT_FILE");
   const { clientId, clientSecret, refreshToken } =
     await getGoogleOAuthCredentials();
 
