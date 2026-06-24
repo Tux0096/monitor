@@ -27,7 +27,7 @@ node_modules/
 deploy_bundle.tar.gz
 deploy_bundle_*.tar.gz
 infra_bundle.tar.gz
-.cursor/
+.cursor/*
 !.cursor/rules/
 !.cursor/rules/**
 docker-compose.production

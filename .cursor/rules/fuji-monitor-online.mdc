@@ -1,0 +1,83 @@
+---
+description: Fuji monitor — только онлайн (сервер + Tux0096/monitor), деплой и доступы
+alwaysApply: true
+---
+
+# Fuji Monitor — рабочий сценарий агента
+
+## Главное правило
+
+- Работать **только онлайн**: правки в git на сервере (`/opt/monitor/src`) и деплой на прод.
+- **Не** использовать `fuji_stat` / `stat.franchise-fuji.ru` — устаревший MVP.
+- **Не** собирать и не деплоить с ПК, если пользователь явно не попросил.
+
+## Целевой проект
+
+| Параметр | Значение |
+|---|---|
+| Репозиторий | https://github.com/Tux0096/monitor |
+| GitHub-аккаунт | `Tux0096` (`gh auth switch -u Tux0096`) |
+| Исходники на сервере | `/opt/monitor/src` |
+| Рантайм / PM2 | `/opt/monitor` |
+| Домен | https://it.franchise-fuji.ru |
+| Обращения | https://it.franchise-fuji.ru/dashboard/appeals |
+| SSH | `ubuntu@83.166.238.251` |
+| Ключ | `~/Downloads/ubuntu-STD3-2-2-20GB-MRGxeuAU.pem` |
+| Порт | `3080` (`MONITOR_PORT` в `/opt/monitor/.env.local`) |
+| БД | Postgres `monitor_core`, таблица `support_appeals` |
+
+## Как вносить изменения
+
+1. SSH → `cd /opt/monitor/src`
+2. `git fetch origin main` → правка файлов **на сервере**
+3. `npm run lint` / `npm run build` **на сервере**
+4. Деплой → smoke-test appeals + MAX webhook
+
+Секреты только в `/opt/monitor/.env.local`. В git не коммитить.
+
+## Деплой на прод (основной)
+
+```bash
+cd /opt/monitor
+bash scripts/server-git-deploy.sh
+```
+
+Скрипт: `git pull` → `npm ci` → `npm run build` → standalone в `/opt/monitor/.next` → `pm2 restart monitor`.
+
+Принудительно без новых коммитов: `FORCE=1 bash scripts/server-git-deploy.sh`
+
+Проверка:
+
+```bash
+pm2 list
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3080
+```
+
+## MAX webhook
+
+```bash
+cd /opt/monitor && bash scripts/server-max-subscribe.sh
+bash scripts/server-list-subscriptions.sh
+```
+
+URL: `https://it.franchise-fuji.ru/api/max/webhook`
+
+Логи: `/opt/monitor/max-webhook.log`, `max-poller.log`
+
+## Коммит с сервера
+
+```bash
+cd /opt/monitor/src
+git add -A && git commit -m "..." && git push origin main
+bash /opt/monitor/scripts/server-git-deploy.sh
+```
+
+## Запасной деплой
+
+`scripts/deploy.ps1` (сборка на ПК + scp) — **только по явной просьбе**.
+
+## Не делать
+
+- Не деплоить в `/opt/fuji-stat` / `stat.franchise-fuji.ru`
+- Не использовать `Tux96/stat` для monitor-задач
+- Не выводить секреты в чат
