@@ -1,11 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import https from "node:https";
 
 import { appealPhotoPublicPath, resolveAppealPhotoFile } from "@/lib/appeal-uploads";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 
-const telegramApiBase = "https://api.telegram.org";
+const telegramHost = "api.telegram.org";
 
 function botToken() {
   const token = getRuntimeEnv("TELEGRAM_BOT_TOKEN");
@@ -15,72 +16,120 @@ function botToken() {
   return token;
 }
 
-function apiUrl(method: string) {
-  return `${telegramApiBase}/bot${botToken()}/${method}`;
+function telegramApiIp() {
+  return getRuntimeEnv("TELEGRAM_API_IP") || telegramHost;
+}
+
+function telegramPath(method: string) {
+  return `/bot${botToken()}/${method}`;
+}
+
+function telegramRequest<T>(method: string, body?: Record<string, unknown>): Promise<T> {
+  const payload = body ? JSON.stringify(body) : null;
+  const ip = telegramApiIp();
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: ip,
+        servername: telegramHost,
+        path: telegramPath(method),
+        method: payload ? "POST" : "GET",
+        headers: {
+          Host: telegramHost,
+          ...(payload
+            ? {
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload),
+              }
+            : {}),
+        },
+      },
+      (res) => {
+        let raw = "";
+        res.on("data", (chunk) => {
+          raw += chunk;
+        });
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(raw) as T);
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function telegramBinaryRequest(path: string): Promise<Buffer> {
+  const ip = telegramApiIp();
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: ip,
+        servername: telegramHost,
+        path,
+        method: "GET",
+        headers: {
+          Host: telegramHost,
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on("end", () => {
+          if ((res.statusCode ?? 500) >= 400) {
+            reject(new Error(`Telegram file download failed: ${res.statusCode}`));
+            return;
+          }
+          resolve(Buffer.concat(chunks));
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 export async function sendTelegramMessage(chatId: string, text: string) {
-  const response = await fetch(apiUrl("sendMessage"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-    }),
+  const result = await telegramRequest<{ ok?: boolean; description?: string }>("sendMessage", {
+    chat_id: chatId,
+    text,
   });
-
-  if (!response.ok) {
-    const details = await response.text().catch(() => "");
-    throw new Error(`Telegram sendMessage failed: ${response.status}: ${details}`);
+  if (!result.ok) {
+    throw new Error(`Telegram sendMessage failed: ${result.description ?? "unknown error"}`);
   }
 }
 
 export async function setTelegramWebhook(url: string, secretToken: string) {
-  const response = await fetch(apiUrl("setWebhook"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      url,
-      secret_token: secretToken,
-      allowed_updates: ["message"],
-      drop_pending_updates: false,
-    }),
+  return telegramRequest("setWebhook", {
+    url,
+    secret_token: secretToken,
+    allowed_updates: ["message"],
+    drop_pending_updates: false,
   });
-
-  if (!response.ok) {
-    throw new Error(`Telegram setWebhook failed: ${response.status}: ${await response.text()}`);
-  }
-
-  return response.json();
 }
 
 export async function getTelegramWebhookInfo() {
-  const response = await fetch(apiUrl("getWebhookInfo"));
-  if (!response.ok) {
-    throw new Error(`Telegram getWebhookInfo failed: ${response.status}: ${await response.text()}`);
-  }
-  return response.json();
+  return telegramRequest("getWebhookInfo");
 }
 
 export async function saveTelegramPhoto(fileId: string): Promise<string | null> {
-  const getFileResponse = await fetch(apiUrl("getFile"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_id: fileId }),
-  });
-  if (!getFileResponse.ok) return null;
-
-  const getFilePayload = (await getFileResponse.json()) as {
+  const getFilePayload = await telegramRequest<{
     ok?: boolean;
     result?: { file_path?: string };
-  };
+  }>("getFile", { file_id: fileId });
   const filePath = getFilePayload.result?.file_path?.trim();
   if (!filePath) return null;
 
-  const fileResponse = await fetch(`${telegramApiBase}/file/bot${botToken()}/${filePath}`);
-  if (!fileResponse.ok) return null;
-
-  const buffer = Buffer.from(await fileResponse.arrayBuffer());
+  const buffer = await telegramBinaryRequest(`/file/bot${botToken()}/${filePath}`);
   if (buffer.length < 32 || buffer.length > 8 * 1024 * 1024) return null;
 
   const extension = filePath.includes(".") ? filePath.split(".").pop()!.toLowerCase() : "jpg";
