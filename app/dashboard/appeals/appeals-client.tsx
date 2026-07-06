@@ -440,6 +440,7 @@ export function AppealsClient() {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-medium text-white">№{appeal.appealNumber}</span>
+                        <SourceBadge source={appeal.source} />
                         <CategoryBadge
                           label={needsType ? "Уточнить тип" : categoryLabel}
                           active={selectedCategories.includes(categoryKey)}
@@ -583,7 +584,7 @@ function Header({
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div>
-        <p className="text-xs text-zinc-600">MAX · обращения курьеров</p>
+        <p className="text-xs text-zinc-600">MAX · Telegram · обращения курьеров</p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Обращения</h1>
         {unreadTotal > 0 ? (
           <p className="mt-2 text-sm text-sky-300">
@@ -730,6 +731,15 @@ function AppealClassificationEditor({
         </button>
       </div>
     </div>
+  );
+}
+
+function SourceBadge({ source }: { source: string }) {
+  const label = source === "telegram" ? "Telegram" : source === "max" ? "MAX" : source;
+  return (
+    <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-xs text-zinc-400">
+      {label}
+    </span>
   );
 }
 

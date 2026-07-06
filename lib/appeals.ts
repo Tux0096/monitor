@@ -128,6 +128,7 @@ export type SupportMessageInput = {
   contactName?: string | null;
   contactVerified?: boolean;
   isBot?: boolean;
+  source?: "max" | "telegram";
 };
 
 export type SupportMessageResult = {
@@ -1779,10 +1780,52 @@ export async function handleSupportGroupMessage(
   }
 
   await clearDialog(conversationKey);
-  return createAppealFromGroupMessage(conversationKey, input, profile);
+  return createAppealFromChatMessage("max", conversationKey, input, profile);
 }
 
-async function createAppealFromGroupMessage(
+export async function handleTelegramSupportMessage(
+  input: SupportMessageInput,
+): Promise<SupportMessageResult> {
+  await ensureAppealsSchema();
+  if (input.isBot || isBotReplyText(input.text)) return { action: "skipped", reply: null };
+  const allowedChatIds = getAllowedTelegramChatIds();
+  if (allowedChatIds.length > 0 && !allowedChatIds.includes(input.chatId)) {
+    return { action: "skipped", reply: null };
+  }
+  if (!input.userId) return { action: "skipped", reply: null };
+
+  const profileKey = `tg:${input.userId}`;
+  const conversationKey = `tg:${input.chatId}:${input.userId}`;
+  await appendMessage({
+    appealId: null,
+    conversationKey,
+    direction: "in",
+    maxChatId: input.chatId,
+    maxUserId: profileKey,
+    maxMessageId: input.messageId ? `tg:${input.messageId}` : null,
+    text: input.text,
+    photoUrl: input.photoUrl,
+  });
+
+  const profile = await upsertCourierProfile(profileKey, {
+    displayName: input.senderName,
+    lastName: input.senderLastName,
+  });
+
+  if (!shouldRegisterSupportAppeal(input.text, Boolean(input.photoUrl))) {
+    return { action: "ignored", reply: null };
+  }
+
+  return createAppealFromChatMessage(
+    "telegram",
+    conversationKey,
+    { ...input, userId: profileKey, messageId: input.messageId ? `tg:${input.messageId}` : null },
+    profile,
+  );
+}
+
+async function createAppealFromChatMessage(
+  source: "max" | "telegram",
   conversationKey: string,
   input: SupportMessageInput,
   profile: CourierProfile,
@@ -1864,7 +1907,7 @@ async function createAppealFromGroupMessage(
       operator_reply, result_text, point_id
     )
     VALUES (
-      'max', 'open', ${input.chatId}, ${input.userId}, ${draft.messageId ?? input.messageId},
+      ${source}, 'open', ${input.chatId}, ${input.userId}, ${draft.messageId ?? input.messageId},
       ${draft.senderName ?? input.senderName}, ${draft.lastName ?? null}, ${draft.phone ?? null},
       ${draft.phoneModel ?? null}, ${draft.os ?? null}, ${draft.appVersion ?? null},
       ${draft.photoUrl ?? null}, ${suggestion.photoAnalysis ?? null},
@@ -2421,6 +2464,12 @@ function extractOrderNumber(text: string) {
   const match =
     text.match(/заказ[ау]?\s*[#№]?\s*(\d{4,})/i) ?? text.match(/№\s*(\d{4,})/);
   return match?.[1] ?? null;
+}
+
+function getAllowedTelegramChatIds(): string[] {
+  const raw = getRuntimeEnv("TELEGRAM_SUPPORT_CHAT_IDS");
+  if (!raw) return [];
+  return raw.split(",").map((value) => value.trim()).filter(Boolean);
 }
 
 function getAllowedSupportChatIds(): string[] {
