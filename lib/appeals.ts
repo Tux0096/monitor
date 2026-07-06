@@ -1233,6 +1233,7 @@ export async function createCourierAppealFromMiniApp(input: {
   const savedProfile =
     (await getCourierProfileByMaxOrPhone(input.maxUserId, draft.phone ?? profile.phone)) ?? profile;
 
+  const classification = draft.classification!;
   const suggestion = await suggestSupportReply({
     description,
     classification,
