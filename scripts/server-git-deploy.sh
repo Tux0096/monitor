@@ -57,15 +57,15 @@ cp -R scripts/. "${APP}/scripts/"
 cp scripts/start-monitor.sh "${APP}/start-monitor.sh"
 chmod +x "${APP}/start-monitor.sh"
 cp scripts/max-poller.py "${APP}/max-poller.py" 2>/dev/null || true
-cp scripts/telegram-poller.sh "${APP}/telegram-poller.sh" 2>/dev/null || true
-chmod +x "${APP}/telegram-poller.sh" 2>/dev/null || true
+cp scripts/telegram-poller.py "${APP}/telegram-poller.py" 2>/dev/null || true
+chmod +x "${APP}/telegram-poller.py" 2>/dev/null || true
 
 cd "${APP}"
 pm2 delete "${PM2_APP}" >/dev/null 2>&1 || true
 HOSTNAME=0.0.0.0 PORT="${PORT}" pm2 start start-monitor.sh --name "${PM2_APP}" --interpreter bash --cwd "${APP}" --update-env
 if grep -q '^TELEGRAM_BOT_TOKEN=.' "${APP}/.env.local" 2>/dev/null; then
   pm2 delete telegram-poller >/dev/null 2>&1 || true
-  pm2 start telegram-poller.sh --name telegram-poller --interpreter bash --cwd "${APP}" --update-env
+  pm2 start telegram-poller.py --name telegram-poller --interpreter python3 --cwd "${APP}" --update-env
 fi
 pm2 save
 
