@@ -7,6 +7,7 @@ import {
   getCategoryLabel,
   resolveAppealCategoryKey,
   SUPPORT_CATEGORY_CATALOG,
+  SUPPORT_RESOLUTION_PRESETS,
   type SupportCategory,
 } from "@/lib/support-classifier";
 import Link from "next/link";
@@ -32,22 +33,12 @@ type AppealDraft = {
   pointId: string;
 };
 
-type MergeCandidate = {
-  id: string;
-  appealNumber: number;
-  status: Appeal["status"];
-  createdAt: string;
-  shortText: string;
-  issuePreview: string;
-};
-
 export function AppealsClient() {
   const searchParams = useSearchParams();
   const courierFilter = searchParams.get("courier");
   const [appeals, setAppeals] = useState<Appeal[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [replyText, setReplyText] = useState<Record<string, string>>({});
   const [courierDrafts, setCourierDrafts] = useState<Record<string, CourierDraft>>({});
   const [appealDrafts, setAppealDrafts] = useState<Record<string, AppealDraft>>({});
   const [mergeSelection, setMergeSelection] = useState<Record<string, boolean>>({});
@@ -58,7 +49,7 @@ export function AppealsClient() {
   const [selectedCategories, setSelectedCategories] = useState<SupportCategory[]>([]);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "open" | "closed">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "open" | "in_progress" | "closed">("all");
   const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
   const categoryMenuRef = useRef<HTMLDivElement>(null);
   const [points, setPoints] = useState<DeliveryPoint[]>([]);
@@ -145,30 +136,25 @@ export function AppealsClient() {
     });
   }
 
-  async function sendReply(id: string, close = false) {
-    const text = replyText[id]?.trim();
-    if (!text) return;
-    const response = await fetch(`/api/appeals/${id}/reply`, {
-      method: "POST",
+  async function setInProgress(id: string) {
+    const response = await fetch(`/api/appeals/${id}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, close }),
-    });
-    if (response.ok) {
-      setReplyText((current) => ({ ...current, [id]: "" }));
-      await loadAppeals();
-    }
-  }
-
-  async function close(id: string) {
-    const response = await fetch(`/api/appeals/${id}/close`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resultText: replyText[id] || "Обращение обработано" }),
+      body: JSON.stringify({ status: "in_progress" }),
     });
     if (response.ok) await loadAppeals();
   }
 
-  async function saveAppeal(appeal: Appeal, options?: { status?: "open" | "closed" }) {
+  async function closeWithResolution(id: string, resultText: string) {
+    const response = await fetch(`/api/appeals/${id}/close`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resultText }),
+    });
+    if (response.ok) await loadAppeals();
+  }
+
+  async function saveAppeal(appeal: Appeal, options?: { status?: Appeal["status"] }) {
     const draft = appealDrafts[appeal.id];
     if (!draft) return;
     const response = await fetch(`/api/appeals/${appeal.id}`, {
@@ -302,13 +288,15 @@ export function AppealsClient() {
 
   const visibleAppeals = useMemo(() => {
     return baseFilteredAppeals.filter((appeal) => {
-      if (statusFilter === "open" && appeal.status === "closed") return false;
+      if (statusFilter === "open" && appeal.status !== "open") return false;
+      if (statusFilter === "in_progress" && appeal.status !== "in_progress") return false;
       if (statusFilter === "closed" && appeal.status !== "closed") return false;
       return true;
     });
   }, [baseFilteredAppeals, statusFilter]);
 
-  const openCount = baseFilteredAppeals.filter((a) => a.status !== "closed").length;
+  const openCount = baseFilteredAppeals.filter((a) => a.status === "open").length;
+  const inProgressCount = baseFilteredAppeals.filter((a) => a.status === "in_progress").length;
   const closedCount = baseFilteredAppeals.filter((a) => a.status === "closed").length;
   const totalCount = baseFilteredAppeals.length;
   const unreadTotal = baseFilteredAppeals.reduce((sum, appeal) => sum + (appeal.unreadCount ?? 0), 0);
@@ -342,10 +330,16 @@ export function AppealsClient() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <SummaryCard
-          label="Открытые"
+          label="Новые"
           value={openCount}
           active={statusFilter === "open"}
           onClick={() => setStatusFilter("open")}
+        />
+        <SummaryCard
+          label="В работе"
+          value={inProgressCount}
+          active={statusFilter === "in_progress"}
+          onClick={() => setStatusFilter("in_progress")}
         />
         <SummaryCard
           label="Закрытые"
@@ -358,18 +352,6 @@ export function AppealsClient() {
           value={totalCount}
           active={statusFilter === "all"}
           onClick={() => setStatusFilter("all")}
-        />
-        <SummaryCard
-          label="Новые сообщения"
-          value={unreadTotal}
-          active={false}
-          highlight={unreadTotal > 0}
-          onClick={() => {
-            if (unreadTotal > 0) {
-              const firstUnread = visibleAppeals.find((appeal) => (appeal.unreadCount ?? 0) > 0);
-              if (firstUnread) toggleExpanded(firstUnread.id);
-            }
-          }}
         />
       </div>
 
@@ -520,6 +502,8 @@ export function AppealsClient() {
                             }
                             onSave={(options) => void saveAppeal(appeal, options)}
                             onReopen={() => void reopenAppeal(appeal.id)}
+                            onInProgress={() => void setInProgress(appeal.id)}
+                            onClose={(resultText) => void closeWithResolution(appeal.id, resultText)}
                           />
 
                           {appeal.photoUrl ? (
@@ -536,17 +520,6 @@ export function AppealsClient() {
 
                           <MessageHistory appeal={appeal} />
                           <MergedContour appeals={appeal.mergedAppeals} />
-
-                          <AppealReplyPanel
-                            appeal={appeal}
-                            replyText={replyText[appeal.id] ?? appealDrafts[appeal.id]?.operatorReply ?? ""}
-                            onReplyChange={(text) =>
-                              setReplyText((current) => ({ ...current, [appeal.id]: text }))
-                            }
-                            onSend={(close) => void sendReply(appeal.id, close)}
-                            onClose={() => void close(appeal.id)}
-                            onMerged={() => void loadAppeals()}
-                          />
 
                           {mergeMode ? (
                             <MergePanel
@@ -766,17 +739,30 @@ function StatusBadge({ appeal }: { appeal: Appeal }) {
     Boolean(appeal.aiSuggestedReply) &&
     appeal.resultText === appeal.aiSuggestedReply;
 
+  if (autoResolved) {
+    return (
+      <span className="rounded-full bg-blue-500/15 px-2 py-0.5 text-xs text-blue-200">
+        AI ответил
+      </span>
+    );
+  }
+  if (appeal.status === "closed") {
+    return (
+      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">
+        закрыто
+      </span>
+    );
+  }
+  if (appeal.status === "in_progress") {
+    return (
+      <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs text-sky-200">
+        в работе
+      </span>
+    );
+  }
   return (
-    <span
-      className={
-        autoResolved
-          ? "rounded-full bg-blue-500/15 px-2 py-0.5 text-xs text-blue-200"
-          : appeal.status === "closed"
-            ? "rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300"
-            : "rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-200"
-      }
-    >
-      {autoResolved ? "AI ответил" : appeal.status === "closed" ? "закрыто" : "ждёт оператора"}
+    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-200">
+      новое
     </span>
   );
 }
@@ -788,18 +774,36 @@ function AppealEditor({
   onChange,
   onSave,
   onReopen,
+  onInProgress,
+  onClose,
 }: {
   appeal: Appeal;
   points: DeliveryPoint[];
   draft: AppealDraft;
   onChange: (draft: AppealDraft) => void;
-  onSave: (options?: { status?: "open" | "closed" }) => void;
+  onSave: (options?: { status?: Appeal["status"] }) => void;
   onReopen: () => void;
+  onInProgress: () => void;
+  onClose: (resultText: string) => void;
 }) {
+  const [closeOpen, setCloseOpen] = useState(false);
+  const [selectedResolution, setSelectedResolution] = useState<string | null>(null);
+  const [customResolution, setCustomResolution] = useState("");
+
   const autoResolved =
     appeal.status === "closed" &&
     Boolean(appeal.aiSuggestedReply) &&
     appeal.resultText === appeal.aiSuggestedReply;
+
+  const resolutionText = (customResolution.trim() || selectedResolution || "").trim();
+
+  function handleClose() {
+    if (!resolutionText) return;
+    onClose(resolutionText);
+    setCloseOpen(false);
+    setSelectedResolution(null);
+    setCustomResolution("");
+  }
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
@@ -809,6 +813,8 @@ function AppealEditor({
           <span className="text-xs text-blue-300">Закрыто AI — можно исправить</span>
         ) : appeal.status === "closed" ? (
           <span className="text-xs text-zinc-500">Закрытое обращение</span>
+        ) : appeal.status === "in_progress" ? (
+          <span className="text-xs text-sky-300">В работе у оператора</span>
         ) : null}
       </div>
 
@@ -829,16 +835,17 @@ function AppealEditor({
         />
       </label>
 
-      <label className="mt-3 block text-xs text-zinc-500">
-        Итоговый ответ / результат
-        <textarea
-          value={draft.resultText}
-          onChange={(event) => onChange({ ...draft, resultText: event.target.value })}
-          rows={4}
-          placeholder="Текст, который увидит курьер как итог"
-          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
-        />
-      </label>
+      {appeal.status === "closed" && draft.resultText ? (
+        <label className="mt-3 block text-xs text-zinc-500">
+          Решение
+          <textarea
+            value={draft.resultText}
+            onChange={(event) => onChange({ ...draft, resultText: event.target.value })}
+            rows={3}
+            className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+          />
+        </label>
+      ) : null}
 
       <div className="mt-3 flex flex-wrap gap-2">
         <button
@@ -857,221 +864,70 @@ function AppealEditor({
             Открыть снова
           </button>
         ) : (
-          <button
-            type="button"
-            onClick={() => onSave({ status: "closed" })}
-            className="rounded-lg border border-emerald-500/40 px-3 py-2 text-sm text-emerald-200"
-          >
-            Сохранить и закрыть
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AppealReplyPanel({
-  appeal,
-  replyText,
-  onReplyChange,
-  onSend,
-  onClose,
-  onMerged,
-}: {
-  appeal: Appeal;
-  replyText: string;
-  onReplyChange: (text: string) => void;
-  onSend: (close: boolean) => void;
-  onClose: () => void;
-  onMerged: () => void;
-}) {
-  const [mergeOpen, setMergeOpen] = useState(false);
-  const [candidates, setCandidates] = useState<MergeCandidate[]>([]);
-  const [loadingCandidates, setLoadingCandidates] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
-  const [mergeError, setMergeError] = useState<string | null>(null);
-  const [merging, setMerging] = useState(false);
-
-  const selectedCount = Object.values(selectedIds).filter(Boolean).length;
-  const hasContour = appeal.mergedAppeals.length > 0;
-
-  async function loadCandidates() {
-    setLoadingCandidates(true);
-    setMergeError(null);
-    try {
-      const response = await fetch(`/api/appeals/${appeal.id}/merge-candidates`, { cache: "no-store" });
-      if (!response.ok) {
-        setMergeError("Не удалось загрузить список обращений");
-        return;
-      }
-      const data = (await response.json()) as { candidates: MergeCandidate[] };
-      setCandidates(data.candidates);
-      setSelectedIds({});
-    } finally {
-      setLoadingCandidates(false);
-    }
-  }
-
-  async function openMerge() {
-    setMergeOpen(true);
-    await loadCandidates();
-  }
-
-  async function runMerge(ids: string[]) {
-    if (ids.length === 0) {
-      setMergeError("Выберите обращения для объединения");
-      return;
-    }
-    setMerging(true);
-    setMergeError(null);
-    try {
-      const response = await fetch(`/api/appeals/${appeal.id}/merge`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appealIds: ids }),
-      });
-      if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as { error?: string } | null;
-        setMergeError(data?.error ?? "Не удалось объединить");
-        return;
-      }
-      setMergeOpen(false);
-      setSelectedIds({});
-      onMerged();
-    } finally {
-      setMerging(false);
-    }
-  }
-
-  return (
-    <div className="mt-4 space-y-3">
-      {appeal.aiSummary && appeal.status !== "closed" ? (
-        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
-          {appeal.aiSummary}
-          <div className="mt-1 text-xs text-amber-200/80">
-            AI не смог закрыть обращение автоматически — нужен ответ оператора.
-          </div>
-        </div>
-      ) : null}
-      <label className="block text-xs text-zinc-500">
-        Ответ оператора в MAX
-        <textarea
-          value={replyText}
-          onChange={(event) => onReplyChange(event.target.value)}
-          placeholder="Сообщение курьеру в MAX"
-          rows={3}
-          className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
-        />
-      </label>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => onSend(false)}
-          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500"
-        >
-          Отправить в MAX
-        </button>
-        <button
-          type="button"
-          onClick={() => onSend(true)}
-          className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-emerald-400"
-        >
-          Отправить и закрыть
-        </button>
-        {appeal.status !== "closed" ? (
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg border border-emerald-500/40 px-4 py-2 text-sm text-emerald-200"
-          >
-            Закрыть без отправки
-          </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => void (mergeOpen ? setMergeOpen(false) : openMerge())}
-          className={
-            mergeOpen
-              ? "rounded-lg border border-violet-400/50 bg-violet-500/15 px-4 py-2 text-sm text-violet-100"
-              : "rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:border-violet-400/60"
-          }
-        >
-          {mergeOpen ? "Скрыть объединение" : "Объединить обращения"}
-        </button>
-      </div>
-
-      {mergeOpen ? (
-        <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-sm font-medium text-violet-100">
-              Дубли курьера в №{appeal.appealNumber}
-              {hasContour ? ` · контур ${appeal.mergedAppeals.length + 1}` : ""}
-            </div>
-            {candidates.length > 0 ? (
+          <>
+            {appeal.status === "open" ? (
               <button
                 type="button"
-                disabled={merging}
-                onClick={() => void runMerge(candidates.map((item) => item.id))}
-                className="text-xs text-violet-200 underline hover:text-white disabled:opacity-40"
+                onClick={onInProgress}
+                className="rounded-lg border border-sky-500/40 px-3 py-2 text-sm text-sky-200"
               >
-                Объединить все ({candidates.length})
+                В работе
               </button>
             ) : null}
-          </div>
-          <p className="mt-2 text-xs text-violet-100/80">
-            Выберите другие обращения этого курьера — история и сообщения перейдут сюда, курьер получит
-            уведомление в MAX.
-          </p>
-          {loadingCandidates ? (
-            <p className="mt-3 text-xs text-violet-200/70">Загружаем список…</p>
-          ) : candidates.length === 0 ? (
-            <p className="mt-3 text-xs text-violet-200/70">Других обращений этого курьера для объединения нет.</p>
-          ) : (
-            <ul className="mt-3 space-y-2">
-              {candidates.map((candidate) => (
-                <li key={candidate.id}>
-                  <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-violet-500/20 bg-zinc-950/60 px-3 py-2 hover:border-violet-400/30">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(selectedIds[candidate.id])}
-                      onChange={(event) =>
-                        setSelectedIds((current) => ({
-                          ...current,
-                          [candidate.id]: event.target.checked,
-                        }))
-                      }
-                      className="mt-1 rounded border-zinc-600 bg-zinc-900 text-violet-500"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="text-sm font-medium text-violet-50">№{candidate.appealNumber}</span>
-                      <span className="ml-2 text-xs text-violet-200/70">
-                        {new Date(candidate.createdAt).toLocaleString("ru-RU")}
-                        {candidate.status === "closed" ? " · закрыто" : ""}
-                      </span>
-                      <span className="mt-1 block text-xs text-violet-100/80">{candidate.issuePreview}</span>
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-          )}
-          {mergeError ? <p className="mt-2 text-xs text-rose-300">{mergeError}</p> : null}
-          {candidates.length > 0 ? (
             <button
               type="button"
-              disabled={merging || selectedCount === 0}
-              onClick={() =>
-                void runMerge(
-                  Object.entries(selectedIds)
-                    .filter(([, checked]) => checked)
-                    .map(([id]) => id),
-                )
-              }
-              className="mt-3 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
+              onClick={() => setCloseOpen((current) => !current)}
+              className="rounded-lg border border-emerald-500/40 px-3 py-2 text-sm text-emerald-200"
             >
-              {merging ? "Объединяем…" : `Объединить выбранные (${selectedCount})`}
+              {closeOpen ? "Отмена закрытия" : "Закрыть"}
             </button>
-          ) : null}
+          </>
+        )}
+      </div>
+
+      {closeOpen && appeal.status !== "closed" ? (
+        <div className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+          <div className="text-sm font-medium text-emerald-100">Выберите или введите решение</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {SUPPORT_RESOLUTION_PRESETS.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                onClick={() => {
+                  setSelectedResolution(preset);
+                  setCustomResolution("");
+                }}
+                className={
+                  selectedResolution === preset
+                    ? "rounded-lg border border-emerald-400/60 bg-emerald-500/20 px-3 py-1.5 text-xs text-emerald-100"
+                    : "rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-500"
+                }
+              >
+                {preset.length > 48 ? `${preset.slice(0, 48)}…` : preset}
+              </button>
+            ))}
+          </div>
+          <label className="mt-3 block text-xs text-zinc-500">
+            Свой текст решения
+            <textarea
+              value={customResolution}
+              onChange={(event) => {
+                setCustomResolution(event.target.value);
+                setSelectedResolution(null);
+              }}
+              rows={3}
+              placeholder="Опишите, как решена проблема"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={!resolutionText}
+            onClick={handleClose}
+            className="mt-3 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-emerald-400 disabled:opacity-40"
+          >
+            Закрыть обращение
+          </button>
         </div>
       ) : null}
     </div>

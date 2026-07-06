@@ -14,7 +14,7 @@ import {
   buildClassificationFromCategory,
   classifySupportText,
   normalizeSupportText,
-  shouldStartSupportDialog,
+  shouldRegisterSupportAppeal,
   type SupportCategory,
   type SupportClassification,
   type SupportPriority,
@@ -522,8 +522,8 @@ export async function updateAppealByOperator(
   const issueText = input.issueText?.trim();
   const resultText = input.resultText?.trim();
   const operatorReply = input.operatorReply?.trim();
-  const reopen = input.status === "open";
-  const close = input.status === "closed";
+  const nextStatus: AppealStatus = input.status ?? appeal.status;
+  const close = nextStatus === "closed";
 
   let nextIssueText = appeal.issueText;
   if (issueText && issueText !== appeal.issueText) {
@@ -547,7 +547,6 @@ export async function updateAppealByOperator(
     descriptionNormalized = normalizeSupportText(issueText);
   }
 
-  const nextStatus: AppealStatus = reopen ? "open" : close ? "closed" : appeal.status;
   const nextResultText =
     resultText !== undefined ? resultText || null : appeal.resultText;
   const nextOperatorReply =
@@ -572,8 +571,8 @@ export async function updateAppealByOperator(
           ELSE classification_source
         END,
         closed_at = CASE
-          WHEN ${reopen} THEN NULL
-          WHEN ${close} OR (${nextStatus} = 'closed' AND closed_at IS NULL) THEN now()
+          WHEN ${close} THEN now()
+          WHEN ${nextStatus} IN ('open', 'in_progress') THEN NULL
           ELSE closed_at
         END,
         updated_at = now()
@@ -1774,18 +1773,154 @@ export async function handleSupportGroupMessage(
     displayName: input.senderName,
     lastName: input.senderLastName,
   });
-  const dialog = await getDialog(conversationKey);
-  const activeState = dialog?.state ?? null;
 
-  if (activeState) {
-    if (shouldStartSupportDialog(input.text)) {
-      await clearDialog(conversationKey);
-      return startDialog(conversationKey, input, profile);
-    }
-    return continueDialog(conversationKey, activeState, dialog!.draft, input, profile);
+  if (!shouldRegisterSupportAppeal(input.text, Boolean(input.photoUrl))) {
+    return { action: "ignored", reply: null };
   }
-  if (!shouldStartSupportDialog(input.text)) return { action: "ignored", reply: null };
-  return startDialog(conversationKey, input, profile);
+
+  await clearDialog(conversationKey);
+  return createAppealFromGroupMessage(conversationKey, input, profile);
+}
+
+async function createAppealFromGroupMessage(
+  conversationKey: string,
+  input: SupportMessageInput,
+  profile: CourierProfile,
+): Promise<SupportMessageResult> {
+  const description =
+    input.text.trim() ||
+    (input.photoUrl ? "Приложено фото без текста" : "");
+  if (!description && !input.photoUrl) {
+    return { action: "ignored", reply: null };
+  }
+
+  const messageDuplicate = input.messageId ? await findAppealByMessageId(input.messageId) : null;
+  if (messageDuplicate) {
+    return {
+      action: "duplicate",
+      appealNumber: messageDuplicate,
+      reply: `Обращение №${messageDuplicate} уже зарегистрировано.`,
+    };
+  }
+
+  const duplicateNumber = await findSimilarAppeal(input.userId!, description);
+  if (duplicateNumber) {
+    return {
+      action: "duplicate",
+      appealNumber: duplicateNumber,
+      reply: `Обращение №${duplicateNumber} с таким описанием уже зарегистрировано.`,
+    };
+  }
+
+  const draft: AppealDraft = {
+    senderName: input.senderName ?? undefined,
+    messageId: input.messageId ?? undefined,
+    phone: extractPhone(input.text) ?? profile.phone ?? undefined,
+    lastName: input.senderLastName?.trim() || profile.lastName || undefined,
+    description,
+    photoUrl: input.photoUrl ?? undefined,
+    phoneModel: extractPhoneModel(input.text) ?? profile.phoneModel ?? undefined,
+    appVersion: extractAppVersion(input.text) ?? profile.appVersion ?? undefined,
+    os: extractOs(input.text) ?? profile.os ?? undefined,
+    classification: classifySupportText(description),
+  };
+
+  await upsertCourierProfile(input.userId!, {
+    displayName: input.senderName ?? profile.displayName,
+    lastName: draft.lastName ?? profile.lastName,
+    phone: draft.phone ?? profile.phone,
+    phoneModel: draft.phoneModel ?? profile.phoneModel,
+    os: draft.os ?? profile.os,
+    appVersion: draft.appVersion ?? profile.appVersion,
+  });
+  const savedProfile =
+    (await getCourierProfileByMaxOrPhone(input.userId!, draft.phone ?? profile.phone)) ?? profile;
+
+  const classification = classifySupportText(
+    [description, draft.phoneModel, draft.os, draft.appVersion, draft.lastName].filter(Boolean).join("\n"),
+  );
+  draft.classification = classification;
+
+  const suggestion = await suggestSupportReply({
+    description,
+    classification,
+    photoUrl: draft.photoUrl ?? input.photoUrl,
+    courier: {
+      lastName: draft.lastName ?? profile.lastName,
+      phone: draft.phone ?? profile.phone,
+      phoneModel: draft.phoneModel ?? profile.phoneModel,
+      appVersion: draft.appVersion ?? profile.appVersion,
+      os: draft.os ?? profile.os,
+      notes: profile.notes,
+    },
+  });
+
+  const rows = await sql()`
+    INSERT INTO support_appeals (
+      source, status, max_chat_id, max_user_id, max_message_id, sender_name,
+      courier_last_name, phone, phone_model, os, app_version, photo_url,
+      photo_analysis, description_normalized, category, classification, subcategory, priority,
+      confidence, classification_source, order_number, issue_text, ai_summary, ai_suggested_reply,
+      operator_reply, result_text, point_id
+    )
+    VALUES (
+      'max', 'open', ${input.chatId}, ${input.userId}, ${draft.messageId ?? input.messageId},
+      ${draft.senderName ?? input.senderName}, ${draft.lastName ?? null}, ${draft.phone ?? null},
+      ${draft.phoneModel ?? null}, ${draft.os ?? null}, ${draft.appVersion ?? null},
+      ${draft.photoUrl ?? null}, ${suggestion.photoAnalysis ?? null},
+      ${normalizeSupportText(description)}, ${classification.categoryLabel},
+      ${classification.category}, ${classification.subcategory}, ${classification.priority},
+      ${classification.confidence}, 'auto', ${extractOrderNumber(description)}, ${formatIssueText(draft, classification)},
+      ${suggestion.summary}, ${suggestion.suggestedReply},
+      NULL, NULL,
+      ${savedProfile.pointId ?? null}
+    )
+    RETURNING id, appeal_number
+  `;
+  const appealId = String(rows[0].id);
+  if (suggestion.photoAnalysis) {
+    await saveAppealPhotoAnalysis(appealId, suggestion.photoAnalysis);
+  }
+  const learningAppeal: LearningAppealInput = {
+    id: appealId,
+    classification: classification.category,
+    category: classification.categoryLabel,
+    subcategory: classification.subcategory,
+    descriptionNormalized: normalizeSupportText(description),
+    issueText: formatIssueText(draft, classification),
+    phoneModel: draft.phoneModel ?? profile.phoneModel,
+    os: draft.os ?? profile.os,
+    appVersion: draft.appVersion ?? profile.appVersion,
+    photoUrl: draft.photoUrl ?? input.photoUrl ?? null,
+    photoAnalysis: suggestion.photoAnalysis ?? null,
+  };
+  if (suggestion.photoAnalysis) {
+    await ingestPhotoPattern(learningAppeal, suggestion.photoAnalysis);
+  }
+  await sql()`
+    UPDATE support_messages
+    SET appeal_id = ${appealId}
+    WHERE conversation_key = ${conversationKey} AND appeal_id IS NULL
+  `;
+  await sql()`
+    UPDATE courier_profiles
+    SET total_appeals = total_appeals + 1, last_appeal_at = now(), updated_at = now()
+    WHERE max_user_id = ${input.userId}
+  `;
+
+  const appealNumber = Number(rows[0].appeal_number);
+  const reply = `Обращение №${appealNumber} зарегистрировано.`;
+  await appendMessage({
+    appealId,
+    conversationKey,
+    direction: "bot",
+    maxChatId: input.chatId,
+    maxUserId: input.userId,
+    maxMessageId: null,
+    text: reply,
+    photoUrl: null,
+  });
+  return { action: "created", appealNumber, reply };
 }
 
 export async function handleCourierBotMessage(

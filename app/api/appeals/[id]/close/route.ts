@@ -16,7 +16,11 @@ export async function POST(
     resultText?: string;
   };
   const { id } = await params;
-  const appeal = await closeAppeal(id, body.resultText?.trim() || "Закрыто");
+  const resultText = body.resultText?.trim();
+  if (!resultText) {
+    return Response.json({ error: "Укажите решение для закрытия обращения" }, { status: 400 });
+  }
+  const appeal = await closeAppeal(id, resultText);
 
   if (!appeal) {
     return Response.json({ error: "Not found" }, { status: 404 });

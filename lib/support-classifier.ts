@@ -289,6 +289,25 @@ export function shouldStartSupportDialog(text: string): boolean {
   return rules.some((rule) => rule.patterns.some((pattern) => pattern.test(text)));
 }
 
+/** Триггер регистрации обращения: фото, ключевые слова или классификатор. */
+export function shouldRegisterSupportAppeal(text: string, hasPhoto: boolean): boolean {
+  if (hasPhoto) return true;
+  const normalized = text.trim();
+  if (!normalized) return false;
+  if (/проблем/i.test(normalized)) return true;
+  if (/не\s+работ/i.test(normalized)) return true;
+  return shouldStartSupportDialog(normalized);
+}
+
+export const SUPPORT_RESOLUTION_PRESETS = [
+  "Проблема решена, можно продолжать работу.",
+  "Отправлена инструкция по устранению.",
+  "Требуется обновление приложения — проверьте магазин приложений.",
+  "Проблема на стороне оператора связи — попробуйте Wi-Fi.",
+  "Не воспроизводится — обратитесь снова при повторении.",
+  "Обращение закрыто без ответа курьеру.",
+] as const;
+
 export function normalizeSupportText(text: string): string {
   return text
     .toLowerCase()
