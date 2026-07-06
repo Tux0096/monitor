@@ -132,12 +132,14 @@ export type SupportMessageInput = {
 };
 
 export type SupportMessageResult = {
-  action: "ignored" | "prompt" | "created" | "duplicate" | "skipped";
+  action: "ignored" | "prompt" | "created" | "duplicate" | "appended" | "skipped";
   reply: string | null;
   keyboard?: MaxInlineKeyboard;
   appealNumber?: number;
   autoResolved?: boolean;
 };
+
+const APPEAL_DEDUP_HOURS = 1;
 
 type DialogState =
   | "phone"
@@ -1210,13 +1212,12 @@ export async function createCourierAppealFromMiniApp(input: {
     classification: classifySupportText(description),
   };
 
-  const classification = draft.classification!;
-  const duplicateNumber = await findSimilarAppeal(input.maxUserId, description);
-  if (duplicateNumber) {
+  const recent = await findRecentAppealByUser(input.maxUserId);
+  if (recent) {
     return {
       action: "duplicate" as const,
-      appealNumber: duplicateNumber,
-      reply: `Обращение №${duplicateNumber} с таким описанием уже зарегистрировано.`,
+      appealNumber: recent.appealNumber,
+      reply: `Обращение №${recent.appealNumber} уже открыто. Сообщение добавлено.`,
       autoResolved: false,
     };
   }
@@ -1759,28 +1760,12 @@ export async function handleSupportGroupMessage(
   if (!input.userId) return { action: "skipped", reply: null };
 
   const conversationKey = `${input.chatId}:${input.userId}`;
-  await appendMessage({
-    appealId: null,
-    conversationKey,
-    direction: "in",
-    maxChatId: input.chatId,
-    maxUserId: input.userId,
-    maxMessageId: input.messageId,
-    text: input.text,
-    photoUrl: input.photoUrl,
-  });
-
-  const profile = await upsertCourierProfile(input.userId, {
+  await upsertCourierProfile(input.userId, {
     displayName: input.senderName,
     lastName: input.senderLastName,
   });
 
-  if (!shouldRegisterSupportAppeal(input.text, Boolean(input.photoUrl))) {
-    return { action: "ignored", reply: null };
-  }
-
-  await clearDialog(conversationKey);
-  return createAppealFromChatMessage("max", conversationKey, input, profile);
+  return handleSupportChatMessage("max", conversationKey, input, input.userId);
 }
 
 export async function handleTelegramSupportMessage(
@@ -1796,32 +1781,113 @@ export async function handleTelegramSupportMessage(
 
   const profileKey = `tg:${input.userId}`;
   const conversationKey = `tg:${input.chatId}:${input.userId}`;
-  await appendMessage({
-    appealId: null,
-    conversationKey,
-    direction: "in",
-    maxChatId: input.chatId,
-    maxUserId: profileKey,
-    maxMessageId: input.messageId ? `tg:${input.messageId}` : null,
-    text: input.text,
-    photoUrl: input.photoUrl,
-  });
-
-  const profile = await upsertCourierProfile(profileKey, {
+  await upsertCourierProfile(profileKey, {
     displayName: input.senderName,
     lastName: input.senderLastName,
   });
 
-  if (!shouldRegisterSupportAppeal(input.text, Boolean(input.photoUrl))) {
+  return handleSupportChatMessage(
+    "telegram",
+    conversationKey,
+    {
+      ...input,
+      userId: profileKey,
+      messageId: input.messageId ? `tg:${input.messageId}` : null,
+    },
+    profileKey,
+  );
+}
+
+async function handleSupportChatMessage(
+  source: "max" | "telegram",
+  conversationKey: string,
+  input: SupportMessageInput,
+  profileUserId: string,
+): Promise<SupportMessageResult> {
+  const isTrigger = shouldRegisterSupportAppeal(input.text, Boolean(input.photoUrl));
+  const hasContent = Boolean(input.text.trim() || input.photoUrl);
+  if (!hasContent) return { action: "ignored", reply: null };
+
+  const messageDuplicate = input.messageId ? await findAppealByMessageId(input.messageId) : null;
+  if (messageDuplicate) {
+    return {
+      action: "duplicate",
+      appealNumber: messageDuplicate,
+      reply: `Обращение №${messageDuplicate} уже зарегистрировано.`,
+    };
+  }
+
+  const recent = await findRecentAppealByUser(profileUserId);
+  if (recent) {
+    return appendToRecentAppeal(recent, conversationKey, input, isTrigger);
+  }
+
+  if (!isTrigger) {
+    await appendMessage({
+      appealId: null,
+      conversationKey,
+      direction: "in",
+      maxChatId: input.chatId,
+      maxUserId: profileUserId,
+      maxMessageId: input.messageId,
+      text: input.text,
+      photoUrl: input.photoUrl,
+    });
     return { action: "ignored", reply: null };
   }
 
-  return createAppealFromChatMessage(
-    "telegram",
+  const profile =
+    (await getCourierProfileByMaxOrPhone(profileUserId)) ??
+    (await upsertCourierProfile(profileUserId, {
+      displayName: input.senderName,
+      lastName: input.senderLastName,
+    }));
+
+  await clearDialog(conversationKey);
+  return createAppealFromChatMessage(source, conversationKey, { ...input, userId: profileUserId }, profile);
+}
+
+async function appendToRecentAppeal(
+  recent: { id: string; appealNumber: number },
+  conversationKey: string,
+  input: SupportMessageInput,
+  isTrigger: boolean,
+): Promise<SupportMessageResult> {
+  await appendMessage({
+    appealId: recent.id,
     conversationKey,
-    { ...input, userId: profileKey, messageId: input.messageId ? `tg:${input.messageId}` : null },
-    profile,
-  );
+    direction: "in",
+    maxChatId: input.chatId,
+    maxUserId: input.userId,
+    maxMessageId: input.messageId,
+    text: input.text,
+    photoUrl: input.photoUrl,
+  });
+
+  if (input.photoUrl) {
+    await sql()`
+      UPDATE support_appeals
+      SET photo_url = coalesce(photo_url, ${input.photoUrl}),
+          updated_at = now()
+      WHERE id = ${recent.id}
+    `;
+  }
+
+  await sql()`
+    UPDATE support_appeals
+    SET updated_at = now()
+    WHERE id = ${recent.id}
+  `;
+
+  if (isTrigger) {
+    return {
+      action: "duplicate",
+      appealNumber: recent.appealNumber,
+      reply: `Обращение №${recent.appealNumber} уже открыто. Сообщение добавлено.`,
+    };
+  }
+
+  return { action: "appended", appealNumber: recent.appealNumber, reply: null };
 }
 
 async function createAppealFromChatMessage(
@@ -1843,15 +1909,6 @@ async function createAppealFromChatMessage(
       action: "duplicate",
       appealNumber: messageDuplicate,
       reply: `Обращение №${messageDuplicate} уже зарегистрировано.`,
-    };
-  }
-
-  const duplicateNumber = await findSimilarAppeal(input.userId!, description);
-  if (duplicateNumber) {
-    return {
-      action: "duplicate",
-      appealNumber: duplicateNumber,
-      reply: `Обращение №${duplicateNumber} с таким описанием уже зарегистрировано.`,
     };
   }
 
@@ -2118,14 +2175,10 @@ async function advanceDialog(
   );
   draft.classification = classification;
 
-  const duplicateNumber = await findSimilarAppeal(input.userId!, description);
-  if (duplicateNumber) {
+  const recent = await findRecentAppealByUser(input.userId!);
+  if (recent) {
     await clearDialog(conversationKey);
-    return {
-      action: "duplicate",
-      appealNumber: duplicateNumber,
-      reply: `Обращение №${duplicateNumber} с таким описанием уже зарегистрировано. Ожидайте ответа оператора.`,
-    };
+    return appendToRecentAppeal(recent, conversationKey, input, true);
   }
 
   const messageDuplicate = draft.messageId ? await findAppealByMessageId(draft.messageId) : null;
@@ -2363,38 +2416,24 @@ function promptForField(state: DialogState, classification: SupportClassificatio
   }
 }
 
-async function findSimilarAppeal(userId: string, description: string) {
-  const normalized = normalizeSupportText(description);
+async function findRecentAppealByUser(userId: string, hours = APPEAL_DEDUP_HOURS) {
   const rows = await sql()`
-    SELECT appeal_number, description_normalized, issue_text
+    SELECT id, appeal_number
     FROM support_appeals
     WHERE max_user_id = ${userId}
-      AND status <> 'closed'
-      AND created_at >= now() - INTERVAL '30 days'
+      AND merged_into_id IS NULL
+      AND created_at >= now() - interval '1 hour'
+    ORDER BY created_at DESC
+    LIMIT 1
   `;
-  for (const row of rows) {
-    const existing = nullableString(row.description_normalized) ?? normalizeSupportText(String(row.issue_text ?? ""));
-    if (existing === normalized || isSimilarDescription(existing, normalized)) {
-      return Number(row.appeal_number);
-    }
-  }
-  return null;
+  const row = rows[0];
+  if (!row) return null;
+  return { id: String(row.id), appealNumber: Number(row.appeal_number) };
 }
 
 async function findAppealByMessageId(messageId: string) {
   const rows = await sql()`SELECT appeal_number FROM support_appeals WHERE max_message_id = ${messageId} LIMIT 1`;
   return rows[0] ? Number(rows[0].appeal_number) : null;
-}
-
-function isSimilarDescription(a: string, b: string) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (a.length >= 12 && b.length >= 12 && (a.includes(b) || b.includes(a))) return true;
-  const aTokens = new Set(a.split(" ").filter((token) => token.length > 3));
-  const bTokens = b.split(" ").filter((token) => token.length > 3);
-  if (aTokens.size === 0 || bTokens.length === 0) return false;
-  const overlap = bTokens.filter((token) => aTokens.has(token)).length;
-  return overlap / Math.max(aTokens.size, bTokens.length) >= 0.7;
 }
 
 function formatIssueText(draft: AppealDraft, classification: SupportClassification) {
@@ -2479,7 +2518,12 @@ function getAllowedSupportChatIds(): string[] {
 }
 
 function isBotReplyText(text: string) {
-  return /^обращение\s*№?\s*#?\d+/i.test(text.trim()) || /^для регистрации обращения/i.test(text.trim());
+  const normalized = text.trim();
+  return (
+    /^обращение\s*№?\s*#?\d+/i.test(normalized) ||
+    /^для регистрации обращения/i.test(normalized) ||
+    /^обращение\s*№?\s*#?\d+\s*уже\s+открыто/i.test(normalized)
+  );
 }
 
 async function getDialog(conversationKey: string) {
