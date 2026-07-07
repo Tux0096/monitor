@@ -1,3 +1,4 @@
+import { seedDeliveryPointsCatalog } from "@/lib/delivery-points-seed";
 import postgres from "postgres";
 import { persistAppealPhotoUrl } from "@/lib/appeal-uploads";
 import {
@@ -447,6 +448,7 @@ async function migrateAppealsSchema() {
     SET intake_source_code = 'telegram_support_chat'
     WHERE intake_source_code IS NULL AND source = 'telegram'
   `;
+  await seedDeliveryPointsCatalog();
   } finally {
     await sql()`SELECT pg_advisory_unlock(91020260616)`;
   }
