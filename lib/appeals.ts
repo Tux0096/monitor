@@ -1,3 +1,4 @@
+import { resolveDeliveryPointFromText } from "@/lib/delivery-point-resolver";
 import { seedDeliveryPointsCatalog } from "@/lib/delivery-points-seed";
 import postgres from "postgres";
 import { persistAppealPhotoUrl } from "@/lib/appeal-uploads";
@@ -1405,6 +1406,11 @@ export async function createCourierAppealFromMiniApp(input: {
   });
 
   const autoResolved = suggestion.canAutoResolve;
+  const appealPointId = await resolveAppealPointId({
+    text: description,
+    profilePointId: savedProfile.pointId,
+    maxUserId: input.maxUserId,
+  });
   const conversationKey = `${input.chatId}:${input.maxUserId}`;
   const rows = await sql()`
     INSERT INTO support_appeals (
@@ -1425,7 +1431,7 @@ export async function createCourierAppealFromMiniApp(input: {
       ${suggestion.summary}, ${suggestion.suggestedReply},
       ${autoResolved ? suggestion.suggestedReply : null},
       ${autoResolved ? suggestion.suggestedReply : null},
-      ${savedProfile.pointId ?? null}
+      ${appealPointId ?? null}
     )
     RETURNING id, appeal_number
   `;
@@ -1693,6 +1699,9 @@ export async function createManualAppeal(input: {
     channel: "manual",
     manualCode: input.intakeSourceCode,
   });
+  const resolvedPointId =
+    input.pointId ??
+    (await resolveAppealPointId({ text: incident, profilePointId: null }));
 
   const rows = await sql()`
     INSERT INTO support_appeals (
@@ -1731,7 +1740,7 @@ export async function createManualAppeal(input: {
       ${classification.confidence},
       'operator',
       ${issueText},
-      ${input.pointId ?? null},
+      ${resolvedPointId ?? null},
       ${intakeSourceCode},
       ${input.assignee?.trim() || null},
       ${input.contractor?.trim() || null},
@@ -2390,6 +2399,12 @@ async function createAppealFromChatMessage(
       topicName: input.forumTopicName,
     });
 
+  const appealPointId = await resolveAppealPointId({
+    text: [description, draft.lastName].filter(Boolean).join("\n"),
+    profilePointId: savedProfile.pointId,
+    maxUserId: input.userId ?? undefined,
+  });
+
   const rows = await sql()`
     INSERT INTO support_appeals (
       source, status, max_chat_id, max_user_id, max_message_id, sender_name,
@@ -2408,7 +2423,7 @@ async function createAppealFromChatMessage(
       ${classification.confidence}, 'auto', ${extractOrderNumber(description)}, ${formatIssueText(draft, classification)},
       ${suggestion.summary}, ${suggestion.suggestedReply},
       NULL, NULL,
-      ${savedProfile.pointId ?? null},
+      ${appealPointId ?? null},
       ${intakeSourceCode}
     )
     RETURNING id, appeal_number
@@ -2652,6 +2667,11 @@ async function advanceDialog(
     },
   });
   const autoResolved = suggestion.canAutoResolve;
+  const appealPointId = await resolveAppealPointId({
+    text: [description, draft.lastName].filter(Boolean).join("\n"),
+    profilePointId: savedProfile.pointId,
+    maxUserId: input.userId!,
+  });
   const rows = await sql()`
     INSERT INTO support_appeals (
       source, status, max_chat_id, max_user_id, max_message_id, sender_name,
@@ -2671,7 +2691,7 @@ async function advanceDialog(
       ${suggestion.summary}, ${suggestion.suggestedReply},
       ${autoResolved ? suggestion.suggestedReply : null},
       ${autoResolved ? suggestion.suggestedReply : null},
-      ${savedProfile.pointId ?? null}
+      ${appealPointId ?? null}
     )
     RETURNING id, appeal_number
   `;
@@ -3120,6 +3140,27 @@ async function appendMessage(input: {
       ${input.maxUserId}, ${input.maxMessageId}, ${input.text}, ${input.photoUrl}
     )
   `;
+}
+
+async function resolveAppealPointId(input: {
+  text: string;
+  profilePointId?: string | null;
+  maxUserId?: string;
+}): Promise<string | null> {
+  const resolved = await resolveDeliveryPointFromText(input.text, input.profilePointId);
+  if (!resolved || resolved.confidence < 0.65) {
+    return input.profilePointId ?? null;
+  }
+
+  if (
+    input.maxUserId &&
+    resolved.confidence >= 0.8 &&
+    resolved.id !== input.profilePointId
+  ) {
+    await updateCourierProfile(input.maxUserId, { pointId: resolved.id });
+  }
+
+  return resolved.id;
 }
 
 async function upsertCourierProfile(
