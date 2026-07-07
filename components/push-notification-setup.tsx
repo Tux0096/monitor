@@ -28,23 +28,6 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
   const [state, setState] = useState<PushState>("pending");
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
-      setState("unsupported");
-      return;
-    }
-    if (Notification.permission === "granted") {
-      setState("enabled");
-      return;
-    }
-    if (Notification.permission === "denied") {
-      setState("denied");
-      return;
-    }
-    setState("prompt");
-  }, []);
-
   const enablePush = useCallback(async () => {
     setMessage(null);
     if (typeof window === "undefined") return;
@@ -115,6 +98,28 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
       setMessage(error instanceof Error ? error.message : "Ошибка настройки push");
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+      setState("unsupported");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setState("denied");
+      return;
+    }
+    if (Notification.permission === "granted") {
+      setState("enabled");
+      return;
+    }
+    setState("prompt");
+  }, []);
+
+  useEffect(() => {
+    if (state === "unsupported" || state === "denied" || state === "pending") return;
+    void enablePush();
+  }, [state, enablePush]);
 
   if (state === "unsupported") {
     return compact ? null : (

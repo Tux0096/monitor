@@ -54,9 +54,26 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const prevSlowKeysRef = useRef<Set<string>>(new Set());
 
+  async function enableBrowserNotifications() {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    const permission = await Notification.requestPermission();
+    const granted = permission === "granted";
+    setNotifyEnabled(granted);
+    if (granted && report?.pages) {
+      prevSlowKeysRef.current = new Set();
+    }
+  }
+
   useEffect(() => {
     if (typeof window === "undefined" || !("Notification" in window)) return;
     setNotifyEnabled(Notification.permission === "granted");
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "denied") return;
+    if (Notification.permission === "granted") return;
+    void enableBrowserNotifications();
   }, []);
 
   useEffect(() => {
@@ -90,16 +107,6 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
 
     prevSlowKeysRef.current = new Set(slowNow.map(pageKey));
   }, [report, notifyEnabled]);
-
-  async function enableBrowserNotifications() {
-    if (typeof window === "undefined" || !("Notification" in window)) return;
-    const permission = await Notification.requestPermission();
-    const granted = permission === "granted";
-    setNotifyEnabled(granted);
-    if (granted && report?.pages) {
-      prevSlowKeysRef.current = new Set();
-    }
-  }
 
   useEffect(() => {
     if (!session?.user) return;

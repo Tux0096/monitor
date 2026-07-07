@@ -17,6 +17,7 @@ import {
 } from "@/lib/employee-accounts";
 import { sendMaxMessage, type MaxInlineKeyboard } from "@/lib/max-bot";
 import { getTelegramForumTopicName, sendTelegramMessage } from "@/lib/telegram-bot";
+import { notifyNewAppealPush } from "@/lib/push-notifications";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { suggestSupportReply } from "@/lib/support-ai";
 import {
@@ -1479,6 +1480,14 @@ export async function createCourierAppealFromMiniApp(input: {
     photoUrl: null,
   });
 
+  if (!autoResolved) {
+    void notifyNewAppealPush({
+      appealNumber,
+      preview: description,
+      domain: "appeals",
+    });
+  }
+
   return {
     action: "created" as const,
     appealNumber,
@@ -1735,6 +1744,11 @@ export async function createManualAppeal(input: {
   if (!appeal) {
     throw new Error("Не удалось создать обращение");
   }
+  void notifyNewAppealPush({
+    appealNumber: appeal.appealNumber,
+    preview: incident,
+    domain: "appeals_report",
+  });
   return appeal;
 }
 
@@ -2439,6 +2453,11 @@ async function createAppealFromChatMessage(
     maxMessageId: null,
     text: reply,
     photoUrl: null,
+  });
+  void notifyNewAppealPush({
+    appealNumber,
+    preview: description,
+    domain: source === "telegram" ? "appeals" : "appeals",
   });
   return { action: "created", appealNumber, reply };
 }
