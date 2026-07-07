@@ -8,13 +8,30 @@ const ENV_KEYS = new Set([
   "MAX_BOT_ADMIN_SECRET",
   "MAX_BOT_USER_ID",
   "MAX_SUPPORT_CHAT_IDS",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_BOT_WEBHOOK_SECRET",
+  "TELEGRAM_BOT_ADMIN_SECRET",
+  "TELEGRAM_BOT_WEBHOOK_URL",
+  "TELEGRAM_SUPPORT_CHAT_IDS",
+  "TELEGRAM_IT_TOPIC_IDS",
+  "TELEGRAM_IT_TOPIC_NAMES",
+  "TELEGRAM_API_IP",
   "LOCAL_AI_URL",
   "LOCAL_AI_MODEL",
   "LOCAL_AI_VISION_MODEL",
   "MONITOR_DATABASE_URL",
+  "PUSH_SERVICE_URL",
   "AUTH_SECRET",
   "AUTH_PASSWORD",
   "FIREBASE_PROJECT_ID",
+  "PUSH_FIREBASE_PROJECT_ID",
+  "PUSH_GOOGLE_SERVICE_ACCOUNT_FILE",
+  "PUSH_GOOGLE_SERVICE_ACCOUNT_JSON",
+  "NEXT_PUBLIC_PUSH_FIREBASE_API_KEY",
+  "NEXT_PUBLIC_PUSH_FIREBASE_AUTH_DOMAIN",
+  "NEXT_PUBLIC_PUSH_FIREBASE_MESSAGING_SENDER_ID",
+  "NEXT_PUBLIC_PUSH_FIREBASE_APP_ID",
+  "NEXT_PUBLIC_PUSH_FIREBASE_VAPID_KEY",
   "GOOGLE_SERVICE_ACCOUNT_FILE",
   "GOOGLE_SERVICE_ACCOUNT_JSON",
   "GOOGLE_CLIENT_ID",
@@ -73,14 +90,13 @@ function loadEnvFile(): Map<string, string> {
 }
 
 export function getRuntimeEnv(name: string): string | undefined {
-  if (!ENV_KEYS.has(name)) {
+  if (ENV_KEYS.has(name)) {
+    const fromFile = loadEnvFile().get(name)?.trim().replace(/\r$/, "");
+    if (fromFile) {
+      return fromFile;
+    }
     return process.env[name]?.trim().replace(/\r$/, "") || undefined;
   }
 
-  const fromProcess = process.env[name]?.trim().replace(/\r$/, "");
-  if (fromProcess) {
-    return fromProcess;
-  }
-
-  return loadEnvFile().get(name)?.trim().replace(/\r$/, "") || undefined;
+  return process.env[name]?.trim().replace(/\r$/, "") || undefined;
 }

@@ -28,7 +28,7 @@ $Archive = Join-Path $ProjectRoot "infra_bundle.tar.gz"
 
 Set-Location $ProjectRoot
 if (Test-Path $Archive) { Remove-Item $Archive -Force }
-tar -czf $Archive docker-compose.yml infra services/auth-service packages/contracts
+tar -czf $Archive docker-compose.yml infra services/auth-service services/push-notification-service packages/contracts
 
 Write-Host "==> upload infra bundle"
 & scp -o StrictHostKeyChecking=accept-new -i $KeyPath $Archive "${Remote}:${REMOTE_DIR}/"
@@ -43,6 +43,7 @@ docker compose --env-file .env up -d --build
 docker exec monitor-postgres sh -lc "psql -U monitor -d monitor_auth -tc \"SELECT 1 FROM pg_database WHERE datname = 'monitor_core'\" | grep -q 1 || createdb -U monitor monitor_core"
 docker compose ps
 curl -sf http://127.0.0.1:3101/health | grep -q '"status":"ok"' && echo 'auth OK' || (echo 'auth FAIL' && exit 1)
+curl -sf http://127.0.0.1:3103/health | grep -q '"status":"ok"' && echo 'push OK' || (echo 'push FAIL' && exit 1)
 "@
 
 Write-Host "==> docker compose up (monitor-net only)"

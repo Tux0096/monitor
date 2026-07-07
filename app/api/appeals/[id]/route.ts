@@ -18,6 +18,12 @@ export async function PATCH(
     operatorReply?: string;
     status?: AppealStatus;
     pointId?: string | null;
+    intakeSourceCode?: string | null;
+    inProgressAt?: string | null;
+    resolutionMethod?: "remote" | "onsite" | null;
+    assignee?: string | null;
+    contractor?: string | null;
+    itComment?: string | null;
   };
 
   const { id } = await params;

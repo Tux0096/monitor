@@ -47,6 +47,43 @@ services:
       timeout: 5s
       retries: 5
 
+  push-notification-service:
+    build:
+      context: ./services/push-notification-service
+      dockerfile: Dockerfile
+    container_name: monitor-push-service
+    restart: unless-stopped
+    networks:
+      - monitor-net
+    depends_on:
+      monitor-postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3103"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-monitor}:${POSTGRES_PASSWORD}@monitor-postgres:5432/monitor_core
+      PUSH_FIREBASE_PROJECT_ID: ${PUSH_FIREBASE_PROJECT_ID:-}
+      PUSH_GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/push-firebase-sa.json
+      NEXT_PUBLIC_PUSH_FIREBASE_API_KEY: ${NEXT_PUBLIC_PUSH_FIREBASE_API_KEY:-}
+      NEXT_PUBLIC_PUSH_FIREBASE_AUTH_DOMAIN: ${NEXT_PUBLIC_PUSH_FIREBASE_AUTH_DOMAIN:-}
+      NEXT_PUBLIC_PUSH_FIREBASE_MESSAGING_SENDER_ID: ${NEXT_PUBLIC_PUSH_FIREBASE_MESSAGING_SENDER_ID:-}
+      NEXT_PUBLIC_PUSH_FIREBASE_APP_ID: ${NEXT_PUBLIC_PUSH_FIREBASE_APP_ID:-}
+      NEXT_PUBLIC_PUSH_FIREBASE_VAPID_KEY: ${NEXT_PUBLIC_PUSH_FIREBASE_VAPID_KEY:-}
+      MONITOR_WEB_URL: http://host.docker.internal:3080
+      PERFORMANCE_IMPORT_SECRET: ${PERFORMANCE_IMPORT_SECRET:-}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-https://it.franchise-fuji.ru}
+    volumes:
+      - ${PUSH_SA_FILE:-/opt/monitor/secrets/push-firebase-sa.json}:/run/secrets/push-firebase-sa.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:3103:3103"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3103/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   monitor-net:
     name: monitor-net

@@ -1,4 +1,7 @@
+import { readFile } from "node:fs/promises";
+
 import postgres from "postgres";
+import { isLocalAppealPhotoPath, resolveLocalAppealPhotoPath } from "@/lib/appeal-uploads";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { normalizeSupportText } from "@/lib/support-classifier";
 
@@ -84,12 +87,20 @@ export async function analyzeProblemPhoto(photoUrl: string | null | undefined) {
     getRuntimeEnv("LOCAL_AI_VISION_MODEL") ?? "moondream";
 
   try {
-    const imageResponse = await fetch(photoUrl, {
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!imageResponse.ok) return null;
-    const buffer = Buffer.from(await imageResponse.arrayBuffer());
-    if (buffer.length < 512) return null;
+    let buffer: Buffer | null = null;
+    if (isLocalAppealPhotoPath(photoUrl)) {
+      const filePath = resolveLocalAppealPhotoPath(photoUrl);
+      if (filePath) {
+        buffer = await readFile(filePath);
+      }
+    } else {
+      const imageResponse = await fetch(photoUrl, {
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!imageResponse.ok) return null;
+      buffer = Buffer.from(await imageResponse.arrayBuffer());
+    }
+    if (!buffer || buffer.length < 512) return null;
     const base64 = buffer.toString("base64");
 
     const response = await fetch(`${host.replace(/\/$/, "")}/api/generate`, {

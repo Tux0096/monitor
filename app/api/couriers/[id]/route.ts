@@ -45,6 +45,9 @@ export async function PATCH(
     notes?: string;
     tags?: string[];
     pointId?: string | null;
+    isAdmin?: boolean;
+    telegramAccount?: string;
+    maxAccount?: string;
   };
 
   const courier = await updateCourierProfile(existing.maxUserId, {
@@ -57,6 +60,9 @@ export async function PATCH(
     notes: emptyToNull(body.notes),
     tags: body.tags?.filter(Boolean),
     pointId: body.pointId !== undefined ? body.pointId || null : undefined,
+    isAdmin: body.isAdmin,
+    telegramAccount: body.telegramAccount !== undefined ? emptyToNull(body.telegramAccount) : undefined,
+    maxAccount: body.maxAccount !== undefined ? emptyToNull(body.maxAccount) : undefined,
   });
 
   return Response.json({ courier });

@@ -17,6 +17,7 @@ type TelegramUser = {
 type TelegramChat = {
   id?: number;
   type?: string;
+  is_forum?: boolean;
 };
 
 type TelegramPhotoSize = {
@@ -30,6 +31,11 @@ type TelegramMessage = {
   text?: string;
   caption?: string;
   photo?: TelegramPhotoSize[];
+  message_thread_id?: number;
+  is_topic_message?: boolean;
+  forum_topic_created?: {
+    name?: string;
+  };
 };
 
 type TelegramUpdate = {
@@ -51,7 +57,13 @@ export async function POST(request: Request) {
     return Response.json({ ok: true, skipped: "no_message" });
   }
 
-  await logWebhookEvent({ event: "received", updateId: body?.update_id ?? null });
+  await logWebhookEvent({
+    event: "received",
+    updateId: body?.update_id ?? null,
+    chatId: message.chat?.id ?? null,
+    threadId: message.message_thread_id ?? null,
+    topicName: message.forum_topic_created?.name ?? null,
+  });
 
   const parsed = await parseTelegramMessage(message);
   if (!parsed) {
@@ -62,11 +74,14 @@ export async function POST(request: Request) {
 
   if (result.reply) {
     try {
-      await sendTelegramMessage(parsed.chatId, result.reply);
+      await sendTelegramMessage(parsed.chatId, result.reply, {
+        messageThreadId: parsed.messageThreadId,
+      });
     } catch (error) {
       await logWebhookEvent({
         chatId: parsed.chatId,
         userId: parsed.userId,
+        threadId: parsed.messageThreadId,
         action: result.action,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -75,6 +90,7 @@ export async function POST(request: Request) {
     await logWebhookEvent({
       chatId: parsed.chatId,
       userId: parsed.userId,
+      threadId: parsed.messageThreadId,
       action: result.action,
       text: parsed.text.slice(0, 80),
     });
@@ -109,7 +125,11 @@ async function parseTelegramMessage(message: TelegramMessage) {
     senderLastName: from.last_name?.trim() || null,
     text,
     photoUrl,
+    telegramUsername: from.username?.trim() || null,
     isBot: false,
+    isForum: Boolean(chat.is_forum),
+    messageThreadId:
+      message.message_thread_id != null ? String(message.message_thread_id) : null,
   };
 }
 

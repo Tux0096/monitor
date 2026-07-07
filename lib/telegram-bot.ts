@@ -98,10 +98,39 @@ function telegramBinaryRequest(path: string): Promise<Buffer> {
   });
 }
 
-export async function sendTelegramMessage(chatId: string, text: string) {
+const forumTopicNameCache = new Map<string, { name: string; expiresAt: number }>();
+
+export async function getTelegramForumTopicName(
+  chatId: string,
+  messageThreadId: number,
+): Promise<string | null> {
+  const cacheKey = `${chatId}:${messageThreadId}`;
+  const cached = forumTopicNameCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.name;
+  }
+
+  const result = await telegramRequest<{ ok?: boolean; result?: { name?: string } }>("getForumTopic", {
+    chat_id: chatId,
+    message_thread_id: messageThreadId,
+  });
+  const name = result.result?.name?.trim() ?? null;
+  if (name) {
+    forumTopicNameCache.set(cacheKey, { name, expiresAt: Date.now() + 3_600_000 });
+  }
+  return name;
+}
+
+export async function sendTelegramMessage(
+  chatId: string,
+  text: string,
+  options?: { messageThreadId?: string | number | null },
+) {
+  const threadId = options?.messageThreadId;
   const result = await telegramRequest<{ ok?: boolean; description?: string }>("sendMessage", {
     chat_id: chatId,
     text,
+    ...(threadId != null && threadId !== "" ? { message_thread_id: Number(threadId) } : {}),
   });
   if (!result.ok) {
     throw new Error(`Telegram sendMessage failed: ${result.description ?? "unknown error"}`);

@@ -1,5 +1,22 @@
 import postgres from "postgres";
+import { persistAppealPhotoUrl } from "@/lib/appeal-uploads";
+import {
+  durationSeconds,
+  formatReportDuration,
+  getAppealIntakeSourceLabel,
+  getResolutionMethodLabel,
+  resolveIntakeSourceCode,
+  type AppealResolutionMethod,
+} from "@/lib/appeal-intake-sources";
+import {
+  deriveAutoAccounts,
+  employeeMatchesAdminAccounts,
+  normalizeMaxAccountInput,
+  normalizeTelegramAccountInput,
+  type EmployeeSenderMatch,
+} from "@/lib/employee-accounts";
 import { sendMaxMessage, type MaxInlineKeyboard } from "@/lib/max-bot";
+import { getTelegramForumTopicName, sendTelegramMessage } from "@/lib/telegram-bot";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { suggestSupportReply } from "@/lib/support-ai";
 import {
@@ -24,7 +41,7 @@ import {
 
 export type AppealStatus = "open" | "in_progress" | "closed";
 
-export type CourierProfile = {
+export type EmployeeProfile = {
   id: string;
   maxUserId: string;
   displayName: string | null;
@@ -37,10 +54,16 @@ export type CourierProfile = {
   tags: string[];
   pointId: string | null;
   pointName: string | null;
+  isAdmin: boolean;
+  telegramAccount: string | null;
+  maxAccount: string | null;
   totalAppeals: number;
   lastAppealAt: string | null;
   updatedAt: string;
 };
+
+/** @deprecated use EmployeeProfile */
+export type CourierProfile = EmployeeProfile;
 
 export type SupportMessage = {
   id: string;
@@ -93,6 +116,36 @@ export type Appeal = {
   courierProfile: CourierProfile | null;
   messages: SupportMessage[];
   mergedAppeals: Appeal[];
+  intakeSourceCode: string | null;
+  inProgressAt: string | null;
+  resolutionMethod: AppealResolutionMethod | null;
+  assignee: string | null;
+  contractor: string | null;
+  itComment: string | null;
+};
+
+export type AppealReportRow = {
+  id: string;
+  appealNumber: number;
+  status: AppealStatus;
+  date: string;
+  pointName: string | null;
+  incident: string;
+  intakeSourceCode: string | null;
+  intakeSourceLabel: string;
+  initiator: string;
+  receivedAt: string;
+  inProgressAt: string | null;
+  resolvedAt: string | null;
+  resolutionMethod: AppealResolutionMethod | null;
+  resolutionMethodLabel: string;
+  assignee: string | null;
+  contractor: string | null;
+  responseTimeLabel: string;
+  resolveTimeLabel: string;
+  totalTimeLabel: string;
+  itComment: string | null;
+  channelSource: string;
 };
 
 export type AppealAnalyticsRow = {
@@ -108,6 +161,19 @@ export type AppealsTableMetric = {
   label: string;
   values: Record<string, number | string>;
 };
+
+export type AppealSourceFilter = "max" | "telegram";
+
+export type AppealsAnalyticsRange = {
+  from?: string | null;
+  to?: string | null;
+  source?: AppealSourceFilter | "all" | null;
+};
+
+function normalizeAnalyticsSource(source?: string | null): AppealSourceFilter | null {
+  if (source === "max" || source === "telegram") return source;
+  return null;
+}
 
 export type AppealsAnalyticsReport = {
   weeks: string[];
@@ -129,6 +195,11 @@ export type SupportMessageInput = {
   contactVerified?: boolean;
   isBot?: boolean;
   source?: "max" | "telegram";
+  telegramUsername?: string | null;
+  isForum?: boolean;
+  messageThreadId?: string | null;
+  forumTopicName?: string | null;
+  intakeSourceCode?: string | null;
 };
 
 export type SupportMessageResult = {
@@ -187,12 +258,25 @@ export async function ensureAppealsSchema() {
   await schemaReady;
 }
 
+async function migrateCourierProfilesToEmployees() {
+  const rows = await sql()`
+    SELECT tablename
+    FROM pg_tables
+    WHERE schemaname = 'public' AND tablename IN ('courier_profiles', 'employees')
+  `;
+  const names = new Set(rows.map((row) => String(row.tablename)));
+  if (names.has("courier_profiles") && !names.has("employees")) {
+    await sql()`ALTER TABLE courier_profiles RENAME TO employees`;
+  }
+}
+
 async function migrateAppealsSchema() {
   await sql()`SELECT pg_advisory_lock(91020260616)`;
   try {
   await sql()`CREATE EXTENSION IF NOT EXISTS pgcrypto`;
+  await migrateCourierProfilesToEmployees();
   await sql()`
-    CREATE TABLE IF NOT EXISTS courier_profiles (
+    CREATE TABLE IF NOT EXISTS employees (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       max_user_id text UNIQUE NOT NULL,
       display_name text,
@@ -203,6 +287,9 @@ async function migrateAppealsSchema() {
       app_version text,
       notes text,
       tags text[] NOT NULL DEFAULT '{}',
+      is_admin boolean NOT NULL DEFAULT false,
+      telegram_account text,
+      max_account text,
       total_appeals integer NOT NULL DEFAULT 0,
       last_appeal_at timestamptz,
       created_at timestamptz NOT NULL DEFAULT now(),
@@ -266,8 +353,14 @@ async function migrateAppealsSchema() {
     ["courier_last_read_at", "timestamptz"],
     ["operator_last_read_at", "timestamptz"],
     ["point_id", "uuid"],
+    ["intake_source_code", "text"],
+    ["in_progress_at", "timestamptz"],
+    ["resolution_method", "text"],
+    ["assignee", "text"],
+    ["contractor", "text"],
+    ["it_comment", "text"],
   ]);
-  await addColumns("courier_profiles", [
+  await addColumns("employees", [
     ["display_name", "text"],
     ["last_name", "text"],
     ["phone", "text"],
@@ -280,6 +373,9 @@ async function migrateAppealsSchema() {
     ["last_appeal_at", "timestamptz"],
     ["updated_at", "timestamptz NOT NULL DEFAULT now()"],
     ["point_id", "uuid"],
+    ["is_admin", "boolean NOT NULL DEFAULT false"],
+    ["telegram_account", "text"],
+    ["max_account", "text"],
   ]);
   await sql()`
     CREATE TABLE IF NOT EXISTS delivery_points (
@@ -340,6 +436,16 @@ async function migrateAppealsSchema() {
   `;
   await ensureSupportLearningSchema();
   await addColumns("support_appeals", [["photo_analysis", "text"]]);
+  await sql()`
+    UPDATE support_appeals
+    SET intake_source_code = 'max_courier'
+    WHERE intake_source_code IS NULL AND source = 'max'
+  `;
+  await sql()`
+    UPDATE support_appeals
+    SET intake_source_code = 'telegram_support_chat'
+    WHERE intake_source_code IS NULL AND source = 'telegram'
+  `;
   } finally {
     await sql()`SELECT pg_advisory_unlock(91020260616)`;
   }
@@ -362,7 +468,7 @@ export async function syncCourierProfilesFromAppeals() {
       AND lower(trim(category)) IN ('приложение', 'мобильное приложение')
   `;
   await sql()`
-    INSERT INTO courier_profiles (
+    INSERT INTO employees (
       max_user_id,
       display_name,
       last_name,
@@ -389,21 +495,21 @@ export async function syncCourierProfilesFromAppeals() {
     WHERE max_user_id IS NOT NULL
     GROUP BY max_user_id
     ON CONFLICT (max_user_id) DO UPDATE
-    SET display_name = COALESCE(courier_profiles.display_name, EXCLUDED.display_name),
-        last_name = COALESCE(courier_profiles.last_name, EXCLUDED.last_name),
-        phone = COALESCE(courier_profiles.phone, EXCLUDED.phone),
-        phone_model = COALESCE(courier_profiles.phone_model, EXCLUDED.phone_model),
-        os = COALESCE(courier_profiles.os, EXCLUDED.os),
-        app_version = COALESCE(courier_profiles.app_version, EXCLUDED.app_version),
-        total_appeals = GREATEST(courier_profiles.total_appeals, EXCLUDED.total_appeals),
+    SET display_name = COALESCE(employees.display_name, EXCLUDED.display_name),
+        last_name = COALESCE(employees.last_name, EXCLUDED.last_name),
+        phone = COALESCE(employees.phone, EXCLUDED.phone),
+        phone_model = COALESCE(employees.phone_model, EXCLUDED.phone_model),
+        os = COALESCE(employees.os, EXCLUDED.os),
+        app_version = COALESCE(employees.app_version, EXCLUDED.app_version),
+        total_appeals = GREATEST(employees.total_appeals, EXCLUDED.total_appeals),
         last_appeal_at = GREATEST(
-          COALESCE(courier_profiles.last_appeal_at, '-infinity'::timestamptz),
+          COALESCE(employees.last_appeal_at, '-infinity'::timestamptz),
           COALESCE(EXCLUDED.last_appeal_at, '-infinity'::timestamptz)
         ),
         updated_at = now()
   `;
   await sql()`
-    INSERT INTO courier_profiles (
+    INSERT INTO employees (
       max_user_id,
       display_name,
       last_name,
@@ -432,15 +538,15 @@ export async function syncCourierProfilesFromAppeals() {
       AND trim(phone) <> ''
     GROUP BY regexp_replace(phone, '[^0-9+]', '', 'g')
     ON CONFLICT (max_user_id) DO UPDATE
-    SET display_name = COALESCE(courier_profiles.display_name, EXCLUDED.display_name),
-        last_name = COALESCE(courier_profiles.last_name, EXCLUDED.last_name),
-        phone = COALESCE(courier_profiles.phone, EXCLUDED.phone),
-        phone_model = COALESCE(courier_profiles.phone_model, EXCLUDED.phone_model),
-        os = COALESCE(courier_profiles.os, EXCLUDED.os),
-        app_version = COALESCE(courier_profiles.app_version, EXCLUDED.app_version),
-        total_appeals = GREATEST(courier_profiles.total_appeals, EXCLUDED.total_appeals),
+    SET display_name = COALESCE(employees.display_name, EXCLUDED.display_name),
+        last_name = COALESCE(employees.last_name, EXCLUDED.last_name),
+        phone = COALESCE(employees.phone, EXCLUDED.phone),
+        phone_model = COALESCE(employees.phone_model, EXCLUDED.phone_model),
+        os = COALESCE(employees.os, EXCLUDED.os),
+        app_version = COALESCE(employees.app_version, EXCLUDED.app_version),
+        total_appeals = GREATEST(employees.total_appeals, EXCLUDED.total_appeals),
         last_appeal_at = GREATEST(
-          COALESCE(courier_profiles.last_appeal_at, '-infinity'::timestamptz),
+          COALESCE(employees.last_appeal_at, '-infinity'::timestamptz),
           COALESCE(EXCLUDED.last_appeal_at, '-infinity'::timestamptz)
         ),
         updated_at = now()
@@ -513,6 +619,12 @@ export async function updateAppealByOperator(
     operatorReply?: string;
     pointId?: string | null;
     status?: AppealStatus;
+    intakeSourceCode?: string | null;
+    inProgressAt?: string | null;
+    resolutionMethod?: AppealResolutionMethod | null;
+    assignee?: string | null;
+    contractor?: string | null;
+    itComment?: string | null;
   },
 ): Promise<Appeal | null> {
   await ensureAppealsSchema();
@@ -555,6 +667,25 @@ export async function updateAppealByOperator(
   const nextOperatorReply =
     operatorReply !== undefined ? operatorReply || null : appeal.operatorReply;
   const nextPointId = input.pointId !== undefined ? input.pointId : appeal.pointId;
+  const nextIntakeSourceCode =
+    input.intakeSourceCode !== undefined ? input.intakeSourceCode : appeal.intakeSourceCode;
+  const nextResolutionMethod =
+    input.resolutionMethod !== undefined ? input.resolutionMethod : appeal.resolutionMethod;
+  const nextAssignee = input.assignee !== undefined ? input.assignee || null : appeal.assignee;
+  const nextContractor =
+    input.contractor !== undefined ? input.contractor || null : appeal.contractor;
+  const nextItComment = input.itComment !== undefined ? input.itComment || null : appeal.itComment;
+  const markInProgress = nextStatus === "in_progress" && appeal.status !== "in_progress";
+  const explicitInProgressAt =
+    input.inProgressAt !== undefined && input.inProgressAt
+      ? input.inProgressAt
+      : undefined;
+  let nextInProgressAt = appeal.inProgressAt;
+  if (markInProgress) {
+    nextInProgressAt = explicitInProgressAt ?? new Date().toISOString();
+  } else if (input.inProgressAt !== undefined) {
+    nextInProgressAt = input.inProgressAt || null;
+  }
 
   await sql()`
     UPDATE support_appeals
@@ -562,6 +693,12 @@ export async function updateAppealByOperator(
         result_text = ${nextResultText},
         operator_reply = ${nextOperatorReply},
         point_id = ${nextPointId},
+        intake_source_code = ${nextIntakeSourceCode},
+        in_progress_at = ${nextInProgressAt ? new Date(nextInProgressAt) : null},
+        resolution_method = ${nextResolutionMethod},
+        assignee = ${nextAssignee},
+        contractor = ${nextContractor},
+        it_comment = ${nextItComment},
         status = ${nextStatus},
         classification = ${classification},
         category = ${category},
@@ -585,8 +722,7 @@ export async function updateAppealByOperator(
   if (operatorReply && operatorReply !== appeal.operatorReply) {
     await appendMessage({
       appealId: id,
-      conversationKey:
-        appeal.maxChatId && appeal.maxUserId ? `${appeal.maxChatId}:${appeal.maxUserId}` : null,
+      conversationKey: appealConversationKey(appeal),
       direction: "operator",
       maxChatId: appeal.maxChatId,
       maxUserId: appeal.maxUserId,
@@ -601,6 +737,14 @@ export async function updateAppealByOperator(
 
 export async function reopenAppeal(id: string): Promise<Appeal | null> {
   return updateAppealByOperator(id, { status: "open" });
+}
+
+function appealConversationKey(appeal: Pick<Appeal, "maxChatId" | "maxUserId">): string | null {
+  if (!appeal.maxChatId || !appeal.maxUserId) return null;
+  if (appeal.maxUserId.startsWith("tg:")) {
+    return `tg:${appeal.maxChatId}:${appeal.maxUserId.slice(3)}`;
+  }
+  return `${appeal.maxChatId}:${appeal.maxUserId}`;
 }
 
 function appealsShareCourier(left: Appeal, right: Appeal) {
@@ -654,13 +798,23 @@ export async function listMergeCandidates(primaryId: string): Promise<MergeCandi
 }
 
 async function notifyCourierAppealsMerged(primary: Appeal, secondaries: Appeal[]) {
-  if (!primary.maxChatId || secondaries.length === 0) return;
+  if (secondaries.length === 0) return;
   const numbers = secondaries.map((appeal) => `№${appeal.appealNumber}`).join(", ");
   const text = [
     `Обращения ${numbers} объединены с №${primary.appealNumber}.`,
-    "Все сообщения и ответы теперь в одном чате.",
-    "Откройте мини-приложение «Курьер» и выберите главное обращение.",
+    "Все сообщения и ответы теперь в одной карточке.",
   ].join("\n");
+
+  if (primary.maxUserId?.startsWith("tg:") && primary.maxChatId) {
+    try {
+      await sendTelegramMessage(primary.maxChatId, text);
+    } catch {
+      // уведомление не должно блокировать объединение
+    }
+    return;
+  }
+
+  if (!primary.maxChatId) return;
   try {
     await sendMaxMessage(primary.maxChatId, text);
   } catch {
@@ -708,10 +862,7 @@ export async function mergeAppealsInto(
 
     await appendMessage({
       appealId: primaryId,
-      conversationKey:
-        primary.maxChatId && primary.maxUserId
-          ? `${primary.maxChatId}:${primary.maxUserId}`
-          : null,
+      conversationKey: appealConversationKey(primary),
       direction: "system",
       maxChatId: primary.maxChatId,
       maxUserId: primary.maxUserId,
@@ -788,19 +939,21 @@ export async function listCourierProfiles(search?: string): Promise<CourierProfi
   const rows = query
     ? await sql()`
         SELECT cp.*, dp.name AS point_name
-        FROM courier_profiles cp
+        FROM employees cp
         LEFT JOIN delivery_points dp ON dp.id = cp.point_id
         WHERE
           coalesce(cp.last_name, '') ILIKE ${`%${query}%`}
           OR coalesce(cp.display_name, '') ILIKE ${`%${query}%`}
           OR coalesce(cp.phone, '') ILIKE ${`%${query}%`}
           OR cp.max_user_id ILIKE ${`%${query}%`}
+          OR coalesce(cp.telegram_account, '') ILIKE ${`%${query}%`}
+          OR coalesce(cp.max_account, '') ILIKE ${`%${query}%`}
         ORDER BY coalesce(cp.last_appeal_at, cp.updated_at) DESC
         LIMIT 300
       `
     : await sql()`
         SELECT cp.*, dp.name AS point_name
-        FROM courier_profiles cp
+        FROM employees cp
         LEFT JOIN delivery_points dp ON dp.id = cp.point_id
         ORDER BY coalesce(cp.last_appeal_at, cp.updated_at) DESC
         LIMIT 300
@@ -812,7 +965,7 @@ export async function getCourierProfile(id: string): Promise<CourierProfile | nu
   await ensureAppealsSchema();
   const rows = await sql()`
     SELECT cp.*, dp.name AS point_name
-    FROM courier_profiles cp
+    FROM employees cp
     LEFT JOIN delivery_points dp ON dp.id = cp.point_id
     WHERE cp.id = ${id} OR cp.max_user_id = ${id}
     LIMIT 1
@@ -829,7 +982,7 @@ export async function getCourierProfileByMaxOrPhone(
   const normalizedPhone = phone ? normalizePhoneForStorage(phone) : null;
   const rows = await sql()`
     SELECT cp.*, dp.name AS point_name
-    FROM courier_profiles cp
+    FROM employees cp
     LEFT JOIN delivery_points dp ON dp.id = cp.point_id
     WHERE cp.max_user_id = ${maxUserId}
        OR (${normalizedPhone}::text IS NOT NULL AND phone = ${normalizedPhone})
@@ -991,7 +1144,7 @@ async function getCourierAppealById(maxUserId: string, appealId: string, phone?:
         SELECT row_to_json(enriched)
         FROM (
           SELECT cp.*, cdp.name AS point_name
-          FROM courier_profiles cp
+          FROM employees cp
           LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
           WHERE
             (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
@@ -1306,7 +1459,7 @@ export async function createCourierAppealFromMiniApp(input: {
   }
 
   await sql()`
-    UPDATE courier_profiles
+    UPDATE employees
     SET total_appeals = total_appeals + 1, last_appeal_at = now(), updated_at = now()
     WHERE max_user_id = ${input.maxUserId}
   `;
@@ -1347,7 +1500,7 @@ export async function listCourierAppealsForBot(
         SELECT row_to_json(enriched)
         FROM (
           SELECT cp.*, cdp.name AS point_name
-          FROM courier_profiles cp
+          FROM employees cp
           LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
           WHERE
             (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
@@ -1367,60 +1520,222 @@ export async function listCourierAppealsForBot(
   return rows.map(toAppeal);
 }
 
-export async function listAppeals(status?: string): Promise<Appeal[]> {
+export async function listAppeals(status?: string, source?: string): Promise<Appeal[]> {
   await ensureAppealsSchema();
   await syncCourierProfilesFromAppeals();
   await autoAssignAppealClassifications();
-  const rows =
-    status && status !== "all"
-      ? await sql()`
-          SELECT a.*, ap.name AS appeal_point_name,
-            (
-              SELECT row_to_json(enriched)
-              FROM (
-                SELECT cp.*, cdp.name AS point_name
-                FROM courier_profiles cp
-                LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
-                WHERE
-                  (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-                  OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-                ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-                LIMIT 1
-              ) enriched
-            ) AS courier_profile
-          FROM support_appeals a
-          LEFT JOIN delivery_points ap ON ap.id = a.point_id
-          WHERE a.status = ${status}
-            AND a.merged_into_id IS NULL
-          ORDER BY a.created_at DESC
-          LIMIT 200
-        `
-      : await sql()`
-          SELECT a.*, ap.name AS appeal_point_name,
-            (
-              SELECT row_to_json(enriched)
-              FROM (
-                SELECT cp.*, cdp.name AS point_name
-                FROM courier_profiles cp
-                LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
-                WHERE
-                  (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
-                  OR (a.phone IS NOT NULL AND cp.phone = a.phone)
-                ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
-                LIMIT 1
-              ) enriched
-            ) AS courier_profile
-          FROM support_appeals a
-          LEFT JOIN delivery_points ap ON ap.id = a.point_id
-          WHERE a.merged_into_id IS NULL
-          ORDER BY a.created_at DESC
-          LIMIT 200
-        `;
+  const statusFilter = status && status !== "all" ? status : null;
+  const sourceFilter = normalizeAnalyticsSource(source);
+  const rows = await sql()`
+    SELECT a.*, ap.name AS appeal_point_name,
+      (
+        SELECT row_to_json(enriched)
+        FROM (
+          SELECT cp.*, cdp.name AS point_name
+          FROM employees cp
+          LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
+          WHERE
+            (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
+            OR (a.phone IS NOT NULL AND cp.phone = a.phone)
+          ORDER BY CASE WHEN cp.max_user_id = a.max_user_id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) enriched
+      ) AS courier_profile
+    FROM support_appeals a
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
+    WHERE a.merged_into_id IS NULL
+      AND (${statusFilter}::text IS NULL OR a.status = ${statusFilter})
+      AND (${sourceFilter}::text IS NULL OR a.source = ${sourceFilter})
+    ORDER BY a.created_at DESC
+    LIMIT 200
+  `;
   const appeals = rows.map(toAppeal);
   await attachMessages(appeals);
   await attachMergedAppeals(appeals);
   attachUnreadCounts(appeals, "operator");
   return appeals;
+}
+
+function extractIncidentText(issueText: string): string {
+  const problemLine = issueText
+    .split("\n")
+    .find((line) => line.startsWith("Проблема:"))
+    ?.replace(/^Проблема:\s*/, "")
+    .trim();
+  return problemLine || issueText.split("\n").filter(Boolean).slice(-1)[0]?.trim() || issueText.trim();
+}
+
+function formatReportInitiator(appeal: Pick<Appeal, "senderName" | "courierLastName" | "phone">): string {
+  const name = [appeal.senderName, appeal.courierLastName].filter(Boolean).join(" ").trim();
+  if (name && appeal.phone) return `${name} · ${appeal.phone}`;
+  return name || appeal.phone || "—";
+}
+
+function toAppealReportRow(appeal: Appeal): AppealReportRow {
+  const receivedAt = appeal.createdAt;
+  const inProgressAt = appeal.inProgressAt;
+  const resolvedAt = appeal.closedAt;
+  const responseSeconds = durationSeconds(receivedAt, inProgressAt);
+  const resolveSeconds = durationSeconds(inProgressAt, resolvedAt);
+  const totalSeconds = durationSeconds(receivedAt, resolvedAt);
+
+  return {
+    id: appeal.id,
+    appealNumber: appeal.appealNumber,
+    status: appeal.status,
+    date: receivedAt.slice(0, 10),
+    pointName: appeal.pointName,
+    incident: extractIncidentText(appeal.issueText),
+    intakeSourceCode: appeal.intakeSourceCode,
+    intakeSourceLabel: getAppealIntakeSourceLabel(
+      appeal.intakeSourceCode ??
+        resolveIntakeSourceCode({
+          channel:
+            appeal.source === "max" || appeal.source === "telegram" || appeal.source === "manual"
+              ? appeal.source
+              : "manual",
+        }),
+    ),
+    initiator: formatReportInitiator(appeal),
+    receivedAt,
+    inProgressAt,
+    resolvedAt,
+    resolutionMethod: appeal.resolutionMethod,
+    resolutionMethodLabel: getResolutionMethodLabel(appeal.resolutionMethod),
+    assignee: appeal.assignee,
+    contractor: appeal.contractor,
+    responseTimeLabel: formatReportDuration(responseSeconds),
+    resolveTimeLabel: formatReportDuration(resolveSeconds),
+    totalTimeLabel: formatReportDuration(totalSeconds),
+    itComment: appeal.itComment,
+    channelSource: appeal.source,
+  };
+}
+
+export async function listAppealsReport(range?: {
+  from?: string | null;
+  to?: string | null;
+  source?: AppealSourceFilter | "all" | null;
+  channel?: "it" | "courier";
+}): Promise<AppealReportRow[]> {
+  await ensureAppealsSchema();
+  const channel = range?.channel ?? "it";
+  const sourceFilter = channel === "courier" ? "max" : normalizeAnalyticsSource(range?.source ?? null);
+  const fromDate = range?.from ? new Date(`${range.from}T00:00:00.000Z`) : null;
+  const toDate = range?.to ? new Date(`${range.to}T23:59:59.999Z`) : null;
+
+  const rows = await sql()`
+    SELECT a.*, ap.name AS appeal_point_name
+    FROM support_appeals a
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
+    WHERE a.merged_into_id IS NULL
+      AND (
+        (${channel} = 'it' AND a.source <> 'max')
+        OR (${channel} = 'courier' AND a.source = 'max')
+      )
+      AND (${sourceFilter}::text IS NULL OR a.source = ${sourceFilter})
+      AND (${fromDate}::timestamptz IS NULL OR a.created_at >= ${fromDate})
+      AND (${toDate}::timestamptz IS NULL OR a.created_at <= ${toDate})
+    ORDER BY a.created_at DESC
+    LIMIT 500
+  `;
+
+  const appeals = rows.map((row) => toAppeal(row));
+  let filtered = appeals;
+  if (channel === "it") {
+    const adminRows = await loadAdminEmployeeRows();
+    filtered = appeals.filter((appeal) => !appealInitiatorIsAdmin(appeal, adminRows));
+  }
+
+  return filtered.map((appeal) => toAppealReportRow(appeal));
+}
+
+export async function createManualAppeal(input: {
+  incident: string;
+  pointId?: string | null;
+  intakeSourceCode: string;
+  initiatorName?: string | null;
+  initiatorLastName?: string | null;
+  phone?: string | null;
+  assignee?: string | null;
+  contractor?: string | null;
+  itComment?: string | null;
+  receivedAt?: string | null;
+}): Promise<Appeal> {
+  await ensureAppealsSchema();
+  const incident = input.incident.trim();
+  if (incident.length < 4) {
+    throw new Error("Опишите инцидент подробнее");
+  }
+
+  const classification = classifySupportText(incident);
+  const draft: AppealDraft = {
+    senderName: input.initiatorName?.trim() || undefined,
+    lastName: input.initiatorLastName?.trim() || undefined,
+    phone: input.phone?.trim() || undefined,
+    description: incident,
+    classification,
+  };
+  const issueText = formatIssueText(draft, classification);
+  const receivedAt = input.receivedAt ? new Date(input.receivedAt) : new Date();
+  const intakeSourceCode = resolveIntakeSourceCode({
+    channel: "manual",
+    manualCode: input.intakeSourceCode,
+  });
+
+  const rows = await sql()`
+    INSERT INTO support_appeals (
+      source,
+      status,
+      sender_name,
+      courier_last_name,
+      phone,
+      description_normalized,
+      category,
+      classification,
+      subcategory,
+      priority,
+      confidence,
+      classification_source,
+      issue_text,
+      point_id,
+      intake_source_code,
+      assignee,
+      contractor,
+      it_comment,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      'manual',
+      'open',
+      ${input.initiatorName?.trim() || null},
+      ${input.initiatorLastName?.trim() || null},
+      ${input.phone?.trim() || null},
+      ${normalizeSupportText(incident)},
+      ${classification.categoryLabel},
+      ${classification.category},
+      ${classification.subcategory},
+      ${classification.priority},
+      ${classification.confidence},
+      'operator',
+      ${issueText},
+      ${input.pointId ?? null},
+      ${intakeSourceCode},
+      ${input.assignee?.trim() || null},
+      ${input.contractor?.trim() || null},
+      ${input.itComment?.trim() || null},
+      ${receivedAt},
+      ${receivedAt}
+    )
+    RETURNING id
+  `;
+
+  const appeal = await getAppeal(String(rows[0].id));
+  if (!appeal) {
+    throw new Error("Не удалось создать обращение");
+  }
+  return appeal;
 }
 
 export async function getAppeal(id: string): Promise<Appeal | null> {
@@ -1431,7 +1746,7 @@ export async function getAppeal(id: string): Promise<Appeal | null> {
         SELECT row_to_json(enriched)
         FROM (
           SELECT cp.*, cdp.name AS point_name
-          FROM courier_profiles cp
+          FROM employees cp
           LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
           WHERE
             (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
@@ -1463,7 +1778,7 @@ async function attachMergedAppeals(appeals: Appeal[]) {
         SELECT row_to_json(enriched)
         FROM (
           SELECT cp.*, cdp.name AS point_name
-          FROM courier_profiles cp
+          FROM employees cp
           LEFT JOIN delivery_points cdp ON cdp.id = cp.point_id
           WHERE
             (a.max_user_id IS NOT NULL AND cp.max_user_id = a.max_user_id)
@@ -1560,7 +1875,7 @@ export async function updateCourierProfile(
   maxUserId: string,
   input: Partial<
     Pick<
-      CourierProfile,
+      EmployeeProfile,
       | "displayName"
       | "lastName"
       | "phone"
@@ -1570,12 +1885,21 @@ export async function updateCourierProfile(
       | "notes"
       | "tags"
       | "pointId"
+      | "isAdmin"
+      | "telegramAccount"
+      | "maxAccount"
     >
   >,
 ) {
   await ensureAppealsSchema();
+  const telegramAccount =
+    input.telegramAccount !== undefined
+      ? normalizeTelegramAccountInput(input.telegramAccount)
+      : undefined;
+  const maxAccount =
+    input.maxAccount !== undefined ? normalizeMaxAccountInput(input.maxAccount) : undefined;
   const rows = await sql()`
-    INSERT INTO courier_profiles (
+    INSERT INTO employees (
       max_user_id,
       display_name,
       last_name,
@@ -1586,6 +1910,9 @@ export async function updateCourierProfile(
       notes,
       tags,
       point_id,
+      is_admin,
+      telegram_account,
+      max_account,
       updated_at
     )
     VALUES (
@@ -1599,20 +1926,35 @@ export async function updateCourierProfile(
       ${input.notes ?? null},
       ${input.tags ?? []},
       ${input.pointId !== undefined ? input.pointId : null},
+      ${input.isAdmin ?? false},
+      ${telegramAccount ?? null},
+      ${maxAccount ?? null},
       now()
     )
     ON CONFLICT (max_user_id) DO UPDATE
-    SET display_name = COALESCE(EXCLUDED.display_name, courier_profiles.display_name),
-        last_name = COALESCE(EXCLUDED.last_name, courier_profiles.last_name),
-        phone = COALESCE(EXCLUDED.phone, courier_profiles.phone),
-        phone_model = COALESCE(EXCLUDED.phone_model, courier_profiles.phone_model),
-        os = COALESCE(EXCLUDED.os, courier_profiles.os),
-        app_version = COALESCE(EXCLUDED.app_version, courier_profiles.app_version),
-        notes = COALESCE(EXCLUDED.notes, courier_profiles.notes),
-        tags = CASE WHEN cardinality(EXCLUDED.tags) > 0 THEN EXCLUDED.tags ELSE courier_profiles.tags END,
+    SET display_name = COALESCE(EXCLUDED.display_name, employees.display_name),
+        last_name = COALESCE(EXCLUDED.last_name, employees.last_name),
+        phone = COALESCE(EXCLUDED.phone, employees.phone),
+        phone_model = COALESCE(EXCLUDED.phone_model, employees.phone_model),
+        os = COALESCE(EXCLUDED.os, employees.os),
+        app_version = COALESCE(EXCLUDED.app_version, employees.app_version),
+        notes = COALESCE(EXCLUDED.notes, employees.notes),
+        tags = CASE WHEN cardinality(EXCLUDED.tags) > 0 THEN EXCLUDED.tags ELSE employees.tags END,
         point_id = CASE
           WHEN ${input.pointId !== undefined} THEN EXCLUDED.point_id
-          ELSE courier_profiles.point_id
+          ELSE employees.point_id
+        END,
+        is_admin = CASE
+          WHEN ${input.isAdmin !== undefined} THEN EXCLUDED.is_admin
+          ELSE employees.is_admin
+        END,
+        telegram_account = CASE
+          WHEN ${input.telegramAccount !== undefined} THEN EXCLUDED.telegram_account
+          ELSE employees.telegram_account
+        END,
+        max_account = CASE
+          WHEN ${input.maxAccount !== undefined} THEN EXCLUDED.max_account
+          ELSE employees.max_account
         END,
         updated_at = now()
     RETURNING *
@@ -1653,12 +1995,10 @@ export async function suggestReplyForAppeal(id: string) {
   return suggestion;
 }
 
-export async function readAppealAnalytics(range?: {
-  from?: string | null;
-  to?: string | null;
-}): Promise<AppealAnalyticsRow[]> {
+export async function readAppealAnalytics(range?: AppealsAnalyticsRange): Promise<AppealAnalyticsRow[]> {
   await ensureAppealsSchema();
   const { from, to } = resolveAnalyticsDateRange(range);
+  const sourceFilter = normalizeAnalyticsSource(range?.source);
   const rows = await sql()`
     SELECT
       to_char(date_trunc('week', created_at), 'DD.MM') AS label,
@@ -1670,6 +2010,7 @@ export async function readAppealAnalytics(range?: {
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY date_trunc('week', created_at)
     ORDER BY date_trunc('week', created_at)
   `;
@@ -1683,12 +2024,10 @@ export async function readAppealAnalytics(range?: {
   }));
 }
 
-export async function readAppealsAnalyticsReport(range?: {
-  from?: string | null;
-  to?: string | null;
-}): Promise<AppealsAnalyticsReport> {
+export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange): Promise<AppealsAnalyticsReport> {
   await ensureAppealsSchema();
   const { from, to } = resolveAnalyticsDateRange(range);
+  const sourceFilter = normalizeAnalyticsSource(range?.source);
   const weekRows = await sql()`
     SELECT DISTINCT to_char(date_trunc('week', created_at), 'DD.MM - ') ||
       to_char(date_trunc('week', created_at) + INTERVAL '6 days', 'DD.MM') AS label,
@@ -1696,6 +2035,7 @@ export async function readAppealsAnalyticsReport(range?: {
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     ORDER BY week_start
   `;
   const weeks = weekRows.map((row) => String(row.label));
@@ -1708,6 +2048,7 @@ export async function readAppealsAnalyticsReport(range?: {
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY row_label, date_trunc('week', created_at)
   `;
   const userRows = await sql()`
@@ -1719,6 +2060,7 @@ export async function readAppealsAnalyticsReport(range?: {
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY row_label, date_trunc('week', created_at)
     ORDER BY count(*) DESC
     LIMIT 80
@@ -1734,6 +2076,7 @@ export async function readAppealsAnalyticsReport(range?: {
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY date_trunc('week', created_at)
   `;
   return {
@@ -1760,13 +2103,30 @@ export async function handleSupportGroupMessage(
   }
   if (!input.userId) return { action: "skipped", reply: null };
 
+  if (
+    await isEmployeeAdmin({
+      platformUserId: input.userId,
+      source: "max",
+    })
+  ) {
+    return { action: "skipped", reply: null };
+  }
+
   const conversationKey = `${input.chatId}:${input.userId}`;
   await upsertCourierProfile(input.userId, {
     displayName: input.senderName,
     lastName: input.senderLastName,
   });
 
-  return handleSupportChatMessage("max", conversationKey, input, input.userId);
+  return handleSupportChatMessage(
+    "max",
+    conversationKey,
+    {
+      ...input,
+      intakeSourceCode: resolveIntakeSourceCode({ channel: "max" }),
+    },
+    input.userId,
+  );
 }
 
 export async function handleTelegramSupportMessage(
@@ -1778,13 +2138,39 @@ export async function handleTelegramSupportMessage(
   if (allowedChatIds.length > 0 && !allowedChatIds.includes(input.chatId)) {
     return { action: "skipped", reply: null };
   }
+  if (input.isForum) {
+    if (!(await isAllowedTelegramForumTopic(input.chatId, input.messageThreadId))) {
+      return { action: "skipped", reply: null };
+    }
+  }
   if (!input.userId) return { action: "skipped", reply: null };
+
+  let forumTopicName = input.forumTopicName ?? null;
+  if (!forumTopicName && input.isForum && input.messageThreadId) {
+    forumTopicName = await getTelegramForumTopicName(input.chatId, Number(input.messageThreadId));
+  }
+  const intakeSourceCode = resolveIntakeSourceCode({
+    channel: "telegram",
+    topicName: forumTopicName,
+  });
 
   const profileKey = `tg:${input.userId}`;
   const conversationKey = `tg:${input.chatId}:${input.userId}`;
+
+  if (
+    await isEmployeeAdmin({
+      platformUserId: profileKey,
+      telegramUsername: input.telegramUsername,
+      source: "telegram",
+    })
+  ) {
+    return { action: "skipped", reply: null };
+  }
+
   await upsertCourierProfile(profileKey, {
     displayName: input.senderName,
     lastName: input.senderLastName,
+    telegramUsername: input.telegramUsername,
   });
 
   return handleSupportChatMessage(
@@ -1794,6 +2180,8 @@ export async function handleTelegramSupportMessage(
       ...input,
       userId: profileKey,
       messageId: input.messageId ? `tg:${input.messageId}` : null,
+      forumTopicName,
+      intakeSourceCode,
     },
     profileKey,
   );
@@ -1805,11 +2193,24 @@ async function handleSupportChatMessage(
   input: SupportMessageInput,
   profileUserId: string,
 ): Promise<SupportMessageResult> {
-  const isTrigger = shouldRegisterSupportAppeal(input.text, Boolean(input.photoUrl));
-  const hasContent = Boolean(input.text.trim() || input.photoUrl);
+  if (
+    await isEmployeeAdmin({
+      platformUserId: profileUserId,
+      telegramUsername: input.telegramUsername,
+      source,
+    })
+  ) {
+    return { action: "skipped", reply: null };
+  }
+
+  const photoUrl = input.photoUrl ? await persistAppealPhotoUrl(input.photoUrl) : null;
+  const message = { ...input, photoUrl };
+
+  const isTrigger = shouldRegisterSupportAppeal(message.text, Boolean(message.photoUrl));
+  const hasContent = Boolean(message.text.trim() || message.photoUrl);
   if (!hasContent) return { action: "ignored", reply: null };
 
-  const messageDuplicate = input.messageId ? await findAppealByMessageId(input.messageId) : null;
+  const messageDuplicate = message.messageId ? await findAppealByMessageId(message.messageId) : null;
   if (messageDuplicate) {
     return {
       action: "duplicate",
@@ -1820,7 +2221,7 @@ async function handleSupportChatMessage(
 
   const recent = await findRecentAppealByUser(profileUserId);
   if (recent) {
-    return appendToRecentAppeal(recent, conversationKey, input, isTrigger);
+    return appendToRecentAppeal(recent, conversationKey, message, isTrigger);
   }
 
   if (!isTrigger) {
@@ -1828,11 +2229,11 @@ async function handleSupportChatMessage(
       appealId: null,
       conversationKey,
       direction: "in",
-      maxChatId: input.chatId,
+      maxChatId: message.chatId,
       maxUserId: profileUserId,
-      maxMessageId: input.messageId,
-      text: input.text,
-      photoUrl: input.photoUrl,
+      maxMessageId: message.messageId,
+      text: message.text,
+      photoUrl: message.photoUrl,
     });
     return { action: "ignored", reply: null };
   }
@@ -1840,12 +2241,12 @@ async function handleSupportChatMessage(
   const profile =
     (await getCourierProfileByMaxOrPhone(profileUserId)) ??
     (await upsertCourierProfile(profileUserId, {
-      displayName: input.senderName,
-      lastName: input.senderLastName,
+      displayName: message.senderName,
+      lastName: message.senderLastName,
     }));
 
   await clearDialog(conversationKey);
-  return createAppealFromChatMessage(source, conversationKey, { ...input, userId: profileUserId }, profile);
+  return createAppealFromChatMessage(source, conversationKey, { ...message, userId: profileUserId }, profile);
 }
 
 async function appendToRecentAppeal(
@@ -1897,6 +2298,16 @@ async function createAppealFromChatMessage(
   input: SupportMessageInput,
   profile: CourierProfile,
 ): Promise<SupportMessageResult> {
+  if (
+    await isEmployeeAdmin({
+      platformUserId: input.userId ?? profile.maxUserId,
+      telegramUsername: input.telegramUsername,
+      source,
+    })
+  ) {
+    return { action: "skipped", reply: null };
+  }
+
   const description =
     input.text.trim() ||
     (input.photoUrl ? "Приложено фото без текста" : "");
@@ -1956,13 +2367,20 @@ async function createAppealFromChatMessage(
     },
   });
 
+  const intakeSourceCode =
+    input.intakeSourceCode ??
+    resolveIntakeSourceCode({
+      channel: source,
+      topicName: input.forumTopicName,
+    });
+
   const rows = await sql()`
     INSERT INTO support_appeals (
       source, status, max_chat_id, max_user_id, max_message_id, sender_name,
       courier_last_name, phone, phone_model, os, app_version, photo_url,
       photo_analysis, description_normalized, category, classification, subcategory, priority,
       confidence, classification_source, order_number, issue_text, ai_summary, ai_suggested_reply,
-      operator_reply, result_text, point_id
+      operator_reply, result_text, point_id, intake_source_code
     )
     VALUES (
       ${source}, 'open', ${input.chatId}, ${input.userId}, ${draft.messageId ?? input.messageId},
@@ -1974,7 +2392,8 @@ async function createAppealFromChatMessage(
       ${classification.confidence}, 'auto', ${extractOrderNumber(description)}, ${formatIssueText(draft, classification)},
       ${suggestion.summary}, ${suggestion.suggestedReply},
       NULL, NULL,
-      ${savedProfile.pointId ?? null}
+      ${savedProfile.pointId ?? null},
+      ${intakeSourceCode}
     )
     RETURNING id, appeal_number
   `;
@@ -2004,7 +2423,7 @@ async function createAppealFromChatMessage(
     WHERE conversation_key = ${conversationKey} AND appeal_id IS NULL
   `;
   await sql()`
-    UPDATE courier_profiles
+    UPDATE employees
     SET total_appeals = total_appeals + 1, last_appeal_at = now(), updated_at = now()
     WHERE max_user_id = ${input.userId}
   `;
@@ -2271,7 +2690,7 @@ async function advanceDialog(
     WHERE conversation_key = ${conversationKey} AND appeal_id IS NULL
   `;
   await sql()`
-    UPDATE courier_profiles
+    UPDATE employees
     SET total_appeals = total_appeals + 1, last_appeal_at = now(), updated_at = now()
     WHERE max_user_id = ${input.userId}
   `;
@@ -2450,7 +2869,7 @@ function formatIssueText(draft: AppealDraft, classification: SupportClassificati
     draft.carrier ? `Оператор связи: ${draft.carrier}` : "",
     "",
     `Проблема: ${draft.description}`,
-    draft.photoUrl ? `\nФото: ${draft.photoUrl}` : "",
+    draft.photoUrl ? "Фото приложено" : "",
   ]
     .filter((line) => line !== "")
     .join("\n")
@@ -2512,6 +2931,64 @@ function getAllowedTelegramChatIds(): string[] {
   return raw.split(",").map((value) => value.trim()).filter(Boolean);
 }
 
+function getTelegramItTopicNames(): string[] {
+  const raw = getRuntimeEnv("TELEGRAM_IT_TOPIC_NAMES") || "IT заявки,it заявки,айти заявки";
+  return raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function parseTelegramItTopicAllowlist(): Array<{ chatId: string | null; threadId: string }> {
+  const raw = getRuntimeEnv("TELEGRAM_IT_TOPIC_IDS");
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const separator = entry.indexOf(":");
+      if (separator === -1) {
+        return { chatId: null, threadId: entry };
+      }
+      return {
+        chatId: entry.slice(0, separator).trim(),
+        threadId: entry.slice(separator + 1).trim(),
+      };
+    })
+    .filter((entry) => entry.threadId);
+}
+
+function isTelegramItTopicName(topicName: string): boolean {
+  const normalized = topicName.trim().toLowerCase();
+  return getTelegramItTopicNames().some(
+    (allowed) => normalized === allowed || normalized.includes(allowed),
+  );
+}
+
+function isAllowedTelegramTopicById(chatId: string, messageThreadId: string): boolean | null {
+  const allowlist = parseTelegramItTopicAllowlist();
+  if (allowlist.length === 0) return null;
+  return allowlist.some(
+    (entry) =>
+      entry.threadId === messageThreadId && (entry.chatId == null || entry.chatId === chatId),
+  );
+}
+
+async function isAllowedTelegramForumTopic(
+  chatId: string,
+  messageThreadId: string | null | undefined,
+): Promise<boolean> {
+  if (!messageThreadId) return false;
+
+  const allowedById = isAllowedTelegramTopicById(chatId, messageThreadId);
+  if (allowedById === true) return true;
+  if (allowedById === false) return false;
+
+  const topicName = await getTelegramForumTopicName(chatId, Number(messageThreadId));
+  return Boolean(topicName && isTelegramItTopicName(topicName));
+}
+
 function getAllowedSupportChatIds(): string[] {
   const raw = getRuntimeEnv("MAX_SUPPORT_CHAT_IDS");
   if (!raw) return [];
@@ -2547,6 +3024,62 @@ async function clearDialog(conversationKey: string) {
   await sql()`DELETE FROM max_support_dialogs WHERE conversation_key = ${conversationKey}`;
 }
 
+async function isEmployeeAdmin(match: EmployeeSenderMatch): Promise<boolean> {
+  const admins = await loadAdminEmployeeRows();
+  return appealInitiatorIsAdmin(
+    {
+      maxUserId: match.platformUserId,
+      source: match.source,
+      telegramUsername: match.telegramUsername,
+    },
+    admins,
+  );
+}
+
+type AdminEmployeeRow = {
+  platformUserId: string;
+  telegramAccount: string | null;
+  maxAccount: string | null;
+};
+
+async function loadAdminEmployeeRows(): Promise<AdminEmployeeRow[]> {
+  const rows = await sql()`
+    SELECT max_user_id, telegram_account, max_account
+    FROM employees
+    WHERE is_admin = true
+  `;
+  return rows.map((row) => ({
+    platformUserId: String(row.max_user_id),
+    telegramAccount: nullableString(row.telegram_account),
+    maxAccount: nullableString(row.max_account),
+  }));
+}
+
+function appealInitiatorIsAdmin(
+  appeal: Pick<Appeal, "maxUserId" | "source"> & { telegramUsername?: string | null },
+  admins: AdminEmployeeRow[],
+): boolean {
+  if (!appeal.maxUserId || admins.length === 0) return false;
+  const channel =
+    appeal.source === "telegram" || appeal.maxUserId.startsWith("tg:") ? "telegram" : "max";
+  const match: EmployeeSenderMatch = {
+    platformUserId: appeal.maxUserId,
+    telegramUsername: appeal.telegramUsername,
+    source: channel,
+  };
+  return admins.some((row) =>
+    employeeMatchesAdminAccounts(
+      {
+        isAdmin: true,
+        platformUserId: row.platformUserId,
+        telegramAccount: row.telegramAccount,
+        maxAccount: row.maxAccount,
+      },
+      match,
+    ),
+  );
+}
+
 async function appendMessage(input: {
   appealId: string | null;
   conversationKey: string | null;
@@ -2577,21 +3110,29 @@ async function upsertCourierProfile(
     phoneModel?: string | null;
     os?: string | null;
     appVersion?: string | null;
+    telegramUsername?: string | null;
   },
 ) {
+  const auto = deriveAutoAccounts(maxUserId, input.telegramUsername);
   const rows = await sql()`
-    INSERT INTO courier_profiles (max_user_id, display_name, last_name, phone, phone_model, os, app_version, updated_at)
+    INSERT INTO employees (
+      max_user_id, display_name, last_name, phone, phone_model, os, app_version,
+      telegram_account, max_account, updated_at
+    )
     VALUES (
       ${maxUserId}, ${input.displayName ?? null}, ${input.lastName ?? null}, ${input.phone ?? null},
-      ${input.phoneModel ?? null}, ${input.os ?? null}, ${input.appVersion ?? null}, now()
+      ${input.phoneModel ?? null}, ${input.os ?? null}, ${input.appVersion ?? null},
+      ${auto.telegramAccount}, ${auto.maxAccount}, now()
     )
     ON CONFLICT (max_user_id) DO UPDATE
-    SET display_name = COALESCE(EXCLUDED.display_name, courier_profiles.display_name),
-        last_name = COALESCE(EXCLUDED.last_name, courier_profiles.last_name),
-        phone = COALESCE(EXCLUDED.phone, courier_profiles.phone),
-        phone_model = COALESCE(EXCLUDED.phone_model, courier_profiles.phone_model),
-        os = COALESCE(EXCLUDED.os, courier_profiles.os),
-        app_version = COALESCE(EXCLUDED.app_version, courier_profiles.app_version),
+    SET display_name = COALESCE(EXCLUDED.display_name, employees.display_name),
+        last_name = COALESCE(EXCLUDED.last_name, employees.last_name),
+        phone = COALESCE(EXCLUDED.phone, employees.phone),
+        phone_model = COALESCE(EXCLUDED.phone_model, employees.phone_model),
+        os = COALESCE(EXCLUDED.os, employees.os),
+        app_version = COALESCE(EXCLUDED.app_version, employees.app_version),
+        telegram_account = COALESCE(employees.telegram_account, EXCLUDED.telegram_account),
+        max_account = COALESCE(employees.max_account, EXCLUDED.max_account),
         updated_at = now()
     RETURNING *
   `;
@@ -2698,10 +3239,18 @@ function toAppeal(row: postgres.Row): Appeal {
     courierProfile: row.courier_profile ? toCourierProfile(row.courier_profile as postgres.Row) : null,
     messages: [],
     mergedAppeals: [],
+    intakeSourceCode: nullableString(row.intake_source_code),
+    inProgressAt: row.in_progress_at
+      ? new Date(row.in_progress_at as string).toISOString()
+      : null,
+    resolutionMethod: nullableString(row.resolution_method) as AppealResolutionMethod | null,
+    assignee: nullableString(row.assignee),
+    contractor: nullableString(row.contractor),
+    itComment: nullableString(row.it_comment),
   };
 }
 
-function toCourierProfile(row: postgres.Row): CourierProfile {
+function toCourierProfile(row: postgres.Row): EmployeeProfile {
   return {
     id: String(row.id),
     maxUserId: String(row.max_user_id),
@@ -2715,6 +3264,9 @@ function toCourierProfile(row: postgres.Row): CourierProfile {
     tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
     pointId: nullableString(row.point_id),
     pointName: nullableString(row.point_name),
+    isAdmin: Boolean(row.is_admin),
+    telegramAccount: nullableString(row.telegram_account),
+    maxAccount: nullableString(row.max_account),
     totalAppeals: Number(row.total_appeals ?? 0),
     lastAppealAt: row.last_appeal_at ? new Date(row.last_appeal_at as string).toISOString() : null,
     updatedAt: new Date(row.updated_at as string).toISOString(),
@@ -2737,6 +3289,10 @@ function toSupportMessage(row: postgres.Row): SupportMessage {
 function nullableString(value: unknown) {
   return value == null ? null : String(value);
 }
+
+export const listEmployeeProfiles = listCourierProfiles;
+export const getEmployeeProfile = getCourierProfile;
+export const updateEmployeeProfile = updateCourierProfile;
 
 function toLearningInput(appeal: Appeal): LearningAppealInput {
   return {

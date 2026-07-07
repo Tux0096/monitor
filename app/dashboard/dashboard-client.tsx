@@ -4,15 +4,16 @@ import type {
   HistoryChartPoint,
   HistoryPageMetric,
   PerformanceHistoryReport,
+  PerformanceSourceType,
 } from "@/lib/firebase-performance-history";
-import type {
-  AppealsAnalyticsReport,
-  AppealAnalyticsRow,
-} from "@/lib/appeals";
+import {
+  getMetricSlowLabel,
+  isMetricSlow,
+} from "@/lib/monitoring-thresholds";
 import type { MonitorSnapshot } from "@/lib/types";
 import { signOut, useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type ApiErrorPayload = {
   error?: string;
@@ -20,7 +21,6 @@ type ApiErrorPayload = {
 };
 
 const pageSize = 4;
-const METRIC_SLOW_MS = 1100;
 
 const MONTHS_RU = [
   "янв",
@@ -37,13 +37,6 @@ const MONTHS_RU = [
   "дек",
 ];
 
-type AppealsAnalyticsResponse = {
-  rows: AppealAnalyticsRow[];
-  report: AppealsAnalyticsReport;
-};
-
-type AppealsDetailKey = "quality" | "categories" | "users" | "weekly";
-
 export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const router = useRouter();
   const { data: session } = useSession();
@@ -53,18 +46,11 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
   const [siteExpanded, setSiteExpanded] = useState(false);
   const [mobileExpanded, setMobileExpanded] = useState(false);
   const [mobileApiExpanded, setMobileApiExpanded] = useState(false);
-  const [appealsExpanded, setAppealsExpanded] = useState(false);
   const [siteSelectedKey, setSiteSelectedKey] = useState<string | null>(null);
   const [mobileSelectedKey, setMobileSelectedKey] = useState<string | null>(null);
   const [mobileApiSelectedKey, setMobileApiSelectedKey] = useState<string | null>(null);
-  const [monitorDateFrom, setMonitorDateFrom] = useState(() => defaultAppealsDateFrom());
-  const [monitorDateTo, setMonitorDateTo] = useState(() => defaultAppealsDateTo());
-  const [appealRows, setAppealRows] = useState<AppealAnalyticsRow[]>([]);
-  const [appealReport, setAppealReport] = useState<AppealsAnalyticsReport | null>(null);
-  const [appealsDetailKey, setAppealsDetailKey] = useState<AppealsDetailKey | null>(null);
-  const [appealsDateFrom, setAppealsDateFrom] = useState(() => defaultAppealsDateFrom());
-  const [appealsDateTo, setAppealsDateTo] = useState(() => defaultAppealsDateTo());
-  const [appealsLoading, setAppealsLoading] = useState(false);
+  const [monitorDateFrom, setMonitorDateFrom] = useState(() => defaultMonitorDateFrom());
+  const [monitorDateTo, setMonitorDateTo] = useState(() => defaultMonitorDateTo());
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const prevSlowKeysRef = useRef<Set<string>>(new Set());
 
@@ -79,7 +65,7 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
     }
     if (Notification.permission !== "granted") return;
 
-    const slowNow = report.pages.filter((page) => isSlowMetric(page.currentMs));
+    const slowNow = report.pages.filter((page) => isMetricSlow(page.currentMs, page.sourceType));
     const newlySlow = slowNow.filter((page) => !prevSlowKeysRef.current.has(pageKey(page)));
     if (newlySlow.length === 0) {
       prevSlowKeysRef.current = new Set(slowNow.map(pageKey));
@@ -89,12 +75,12 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
     if (newlySlow.length === 1) {
       const item = newlySlow[0]!;
       new Notification("Показатель выше нормы", {
-        body: `${item.metricName}: ${formatTime(item.currentMs)} · норма 1.1 с\n${item.page}`,
+        body: `${item.metricName}: ${formatTime(item.currentMs)} · норма ${getMetricSlowLabel(item.sourceType)}\n${item.page}`,
         tag: `slow-${pageKey(item)}`,
       });
     } else {
       new Notification("Показатели выше нормы", {
-        body: `${newlySlow.length} показателей превысили 1.1 с\n${newlySlow
+        body: `${newlySlow.length} показателей превысили норму\n${newlySlow
           .slice(0, 4)
           .map((item) => `${item.metricName}: ${formatTime(item.currentMs)}`)
           .join("\n")}${newlySlow.length > 4 ? "\n…" : ""}`,
@@ -155,38 +141,6 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
     };
   }, [session?.user, monitorDateFrom, monitorDateTo]);
 
-  useEffect(() => {
-    if (!session?.user) return;
-    let cancelled = false;
-    async function loadAppeals() {
-      setAppealsLoading(true);
-      try {
-        const params = new URLSearchParams();
-        if (appealsDateFrom) params.set("from", appealsDateFrom);
-        if (appealsDateTo) params.set("to", appealsDateTo);
-        const query = params.toString();
-        const response = await fetch(
-          `/api/appeals/analytics${query ? `?${query}` : ""}`,
-          { cache: "no-store" },
-        );
-        if (!response.ok) return;
-        const data = (await response.json()) as AppealsAnalyticsResponse;
-        if (!cancelled) {
-          setAppealRows(data.rows);
-          setAppealReport(data.report);
-        }
-      } finally {
-        if (!cancelled) setAppealsLoading(false);
-      }
-    }
-    void loadAppeals();
-    const interval = window.setInterval(() => void loadAppeals(), 60_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [session?.user, appealsDateFrom, appealsDateTo]);
-
   async function logout() {
     await signOut({ callbackUrl: "/login" });
     router.refresh();
@@ -204,29 +158,14 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
     mobileApiPages[0] ??
     null;
 
-  const appealsSummary = useMemo(
-    () => summarizeAppeals(appealRows, appealReport),
-    [appealRows, appealReport],
-  );
-
-  const appealsPeriodLabel = formatAppealsPeriodLabel(appealsDateFrom, appealsDateTo);
-
-  function toggleAppealsExpanded() {
-    setAppealsExpanded((current) => {
-      const next = !current;
-      if (next && !appealsDetailKey) setAppealsDetailKey("quality");
-      return next;
-    });
-  }
-
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
-      <header className="mb-8 flex items-center justify-between border-b border-zinc-900 pb-5">
-        <div>
+      <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-zinc-900 pb-5">
+        <div className="min-w-0">
           <p className="text-xs text-zinc-600">Фуджи · Performance</p>
           <h1 className="mt-2 text-2xl font-semibold text-white">Аналитика</h1>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto sm:justify-end">
           <span className="text-sm text-zinc-500">{session?.user?.email}</span>
           <button
             type="button"
@@ -249,7 +188,7 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
             summary={`${sitePages.length} показателей${updatedAt ? ` · обновлено ${new Date(updatedAt).toLocaleTimeString("ru-RU")}` : ""}`}
             badge={
               sitePages.length > 0 ? (
-                <SlowMetricsBadge count={countSlowMetrics(sitePages)} />
+                <SlowMetricsBadge count={countSlowMetrics(sitePages)} thresholdLabel="1.3 с" />
               ) : null
             }
             expanded={siteExpanded}
@@ -257,6 +196,7 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
           >
             <MonitoringAlertsBar
               slowCount={countSlowMetrics(sitePages)}
+              thresholdLabel="1.3 с"
               notifyEnabled={notifyEnabled}
               onEnableNotifications={() => void enableBrowserNotifications()}
             />
@@ -267,8 +207,8 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
                 onDateFromChange={setMonitorDateFrom}
                 onDateToChange={setMonitorDateTo}
                 onClear={() => {
-                  setMonitorDateFrom(defaultAppealsDateFrom());
-                  setMonitorDateTo(defaultAppealsDateTo());
+                  setMonitorDateFrom(defaultMonitorDateFrom());
+                  setMonitorDateTo(defaultMonitorDateTo());
                 }}
               />
             </div>
@@ -310,8 +250,8 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
                 onDateFromChange={setMonitorDateFrom}
                 onDateToChange={setMonitorDateTo}
                 onClear={() => {
-                  setMonitorDateFrom(defaultAppealsDateFrom());
-                  setMonitorDateTo(defaultAppealsDateTo());
+                  setMonitorDateFrom(defaultMonitorDateFrom());
+                  setMonitorDateTo(defaultMonitorDateTo());
                 }}
               />
             </div>
@@ -357,8 +297,8 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
                 onDateFromChange={setMonitorDateFrom}
                 onDateToChange={setMonitorDateTo}
                 onClear={() => {
-                  setMonitorDateFrom(defaultAppealsDateFrom());
-                  setMonitorDateTo(defaultAppealsDateTo());
+                  setMonitorDateFrom(defaultMonitorDateFrom());
+                  setMonitorDateTo(defaultMonitorDateTo());
                 }}
               />
             </div>
@@ -376,147 +316,13 @@ export function DashboardClient({}: { initial: MonitorSnapshot }) {
               <EmptyHint text="Данные готовятся. Показатели появятся после первой пробы (каждые 10 минут)." />
             ) : null}
           </ExpandableCard>
-
-          <ExpandableCard
-            title="Обращения"
-            summary={`${appealsSummary.total} за период · ${appealsSummary.open} открытых · ${appealsSummary.categories} категорий`}
-            badge={
-              appealsSummary.total > 0 ? (
-                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-200">
-                  {appealsSummary.closed} закрыто
-                </span>
-              ) : null
-            }
-            expanded={appealsExpanded}
-            onToggle={toggleAppealsExpanded}
-          >
-            <DateRangeFilter
-              dateFrom={appealsDateFrom}
-              dateTo={appealsDateTo}
-              onDateFromChange={setAppealsDateFrom}
-              onDateToChange={setAppealsDateTo}
-              onClear={() => {
-                setAppealsDateFrom(defaultAppealsDateFrom());
-                setAppealsDateTo(defaultAppealsDateTo());
-              }}
-            />
-
-            {appealsLoading ? (
-              <div className="mt-4 text-sm text-zinc-500">Обновляем данные…</div>
-            ) : null}
-
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <StatBlock
-                label="Показатели продуктов"
-                value={appealsSummary.qualityTotal}
-                hint={appealsPeriodLabel}
-                active={appealsDetailKey === "quality"}
-                onClick={() => setAppealsDetailKey("quality")}
-              />
-              <StatBlock
-                label="Категории"
-                value={appealsSummary.categories}
-                hint="типов проблем"
-                active={appealsDetailKey === "categories"}
-                onClick={() => setAppealsDetailKey("categories")}
-              />
-              <StatBlock
-                label="Курьеры"
-                value={appealsSummary.couriers}
-                hint="с повторами"
-                active={appealsDetailKey === "users"}
-                onClick={() => setAppealsDetailKey("users")}
-              />
-              <StatBlock
-                label="По неделям"
-                value={appealsSummary.total}
-                hint={appealsPeriodLabel}
-                active={appealsDetailKey === "weekly"}
-                onClick={() => setAppealsDetailKey("weekly")}
-              />
-            </div>
-
-            {appealsDetailKey === "quality" && appealReport ? (
-              <div className="mt-5">
-                <AnalyticsMatrix
-                  title="Показатели продуктов"
-                  weeks={appealReport.weeks}
-                  rows={appealReport.qualityRows}
-                />
-              </div>
-            ) : null}
-
-            {appealsDetailKey === "categories" && appealReport ? (
-              <div className="mt-5">
-                <AnalyticsMatrix
-                  title="Категории обращений"
-                  weeks={appealReport.weeks}
-                  rows={appealReport.categoryRows}
-                />
-              </div>
-            ) : null}
-
-            {appealsDetailKey === "users" && appealReport ? (
-              <div className="mt-5">
-                <AnalyticsMatrix
-                  title="Повторные обращения по курьерам"
-                  weeks={appealReport.weeks}
-                  rows={appealReport.userRows.slice(0, 12)}
-                />
-              </div>
-            ) : null}
-
-            {appealsDetailKey === "weekly" ? (
-              <div className="mt-5 overflow-hidden rounded-xl border border-zinc-800">
-                <div className="bg-zinc-900/80 px-4 py-3 text-sm font-medium text-zinc-200">
-                  Статистика по неделям ({appealsPeriodLabel})
-                </div>
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-zinc-900/80 text-xs uppercase tracking-wide text-zinc-500">
-                    <tr>
-                      <th className="px-4 py-3 font-medium">Неделя</th>
-                      <th className="px-4 py-3 font-medium">Всего</th>
-                      <th className="px-4 py-3 font-medium">Закрыто</th>
-                      <th className="px-4 py-3 font-medium">В работе</th>
-                      <th className="px-4 py-3 font-medium">Среднее закрытие</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800">
-                    {appealRows.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-4 py-6 text-center text-zinc-500">
-                          Данные готовятся
-                        </td>
-                      </tr>
-                    ) : (
-                      appealRows.map((row) => (
-                        <tr key={row.label}>
-                          <td className="px-4 py-3 text-zinc-300">{row.label}</td>
-                          <td className="px-4 py-3 text-zinc-400">{row.total}</td>
-                          <td className="px-4 py-3 text-zinc-400">{row.closed}</td>
-                          <td className="px-4 py-3 text-zinc-400">{row.open}</td>
-                          <td className="px-4 py-3 text-zinc-400">
-                            {row.avgCloseHours == null ? "—" : `${row.avgCloseHours.toFixed(1)} ч`}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-
-            {!appealsDetailKey ? (
-              <EmptyHint text="Нажмите на блок показателя, чтобы открыть детализацию." />
-            ) : null}
-          </ExpandableCard>
         </div>
       )}
     </main>
   );
 }
 
-function SlowMetricsBadge({ count }: { count: number }) {
+function SlowMetricsBadge({ count, thresholdLabel = "1.1 с" }: { count: number; thresholdLabel?: string }) {
   if (count === 0) {
     return (
       <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">
@@ -526,17 +332,19 @@ function SlowMetricsBadge({ count }: { count: number }) {
   }
   return (
     <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-200">
-      {count} выше 1.1 с
+      {count} выше {thresholdLabel}
     </span>
   );
 }
 
 function MonitoringAlertsBar({
   slowCount,
+  thresholdLabel = "1.1 с",
   notifyEnabled,
   onEnableNotifications,
 }: {
   slowCount: number;
+  thresholdLabel?: string;
   notifyEnabled: boolean;
   onEnableNotifications: () => void;
 }) {
@@ -545,7 +353,7 @@ function MonitoringAlertsBar({
   return (
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2">
       <p className="text-xs text-zinc-500">
-        Норма: <span className="text-zinc-300">≤ 1.1 с</span>
+        Норма: <span className="text-zinc-300">≤ {thresholdLabel}</span>
         {slowCount > 0 ? (
           <span className="ml-2 text-amber-300">
             · {slowCount} показател{slowCount === 1 ? "ь" : slowCount < 5 ? "я" : "ей"} выше нормы
@@ -605,36 +413,6 @@ function ExpandableCard({
   );
 }
 
-function StatBlock({
-  label,
-  value,
-  hint,
-  active,
-  onClick,
-}: {
-  label: string;
-  value: number;
-  hint: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={
-        active
-          ? "rounded-xl border border-sky-400/50 bg-sky-500/10 p-4 text-left transition hover:border-sky-400/70"
-          : "rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-left transition hover:border-zinc-600"
-      }
-    >
-      <div className="text-2xl font-semibold text-white">{value}</div>
-      <div className="mt-1 text-sm text-zinc-300">{label}</div>
-      <div className="mt-0.5 text-xs text-zinc-500">{hint}</div>
-    </button>
-  );
-}
-
 function MonitoringMetricsGrid({
   items,
   selectedKey,
@@ -676,7 +454,7 @@ function MetricDetailPanel({
   item: HistoryPageMetric;
   updatedAt: string | null;
 }) {
-  const slow = isSlowMetric(item.currentMs);
+  const slow = isMetricSlow(item.currentMs, item.sourceType);
   return (
     <div
       className={`mt-6 rounded-xl border p-5 ${
@@ -696,7 +474,7 @@ function MetricDetailPanel({
       <h3 className={`mt-2 text-2xl font-semibold ${slow ? "text-amber-300" : "text-white"}`}>
         {formatTime(item.currentMs)}
       </h3>
-      <PerformanceChart points={item.chart} />
+      <PerformanceChart points={item.chart} sourceType={item.sourceType} />
       <div className="mt-4 flex flex-wrap gap-8 text-sm">
         <MetricLegend
           label="среднее за период"
@@ -713,61 +491,7 @@ function MetricDetailPanel({
           />
         ) : null}
       </div>
-      <WeeklySummaryTable rows={item.weekly} />
-    </div>
-  );
-}
-
-function AnalyticsMatrix({
-  title,
-  weeks,
-  rows,
-}: {
-  title: string;
-  weeks: string[];
-  rows: AppealsAnalyticsReport["categoryRows"];
-}) {
-  return (
-    <div className="overflow-hidden rounded-xl border border-zinc-800">
-      <div className="bg-zinc-900/80 px-4 py-3 text-sm font-medium text-zinc-200">{title}</div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
-          <thead className="bg-blue-500/10 text-xs text-blue-100">
-            <tr>
-              <th className="min-w-72 px-4 py-3 font-medium">Показатель</th>
-              {weeks.length === 0 ? (
-                <th className="px-4 py-3 font-medium">Нет данных</th>
-              ) : (
-                weeks.map((week) => (
-                  <th key={week} className="px-4 py-3 font-medium">
-                    {week}
-                  </th>
-                ))
-              )}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-800">
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={weeks.length + 1} className="px-4 py-6 text-center text-zinc-500">
-                  Данные готовятся
-                </td>
-              </tr>
-            ) : (
-              rows.map((row) => (
-                <tr key={row.key}>
-                  <td className="px-4 py-3 text-zinc-300">{row.label}</td>
-                  {weeks.map((week) => (
-                    <td key={week} className="px-4 py-3 text-zinc-400">
-                      {row.values[week] ?? 0}
-                    </td>
-                  ))}
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      <WeeklySummaryTable rows={item.weekly} sourceType={item.sourceType} />
     </div>
   );
 }
@@ -780,34 +504,8 @@ function EmptyHint({ text }: { text: string }) {
   );
 }
 
-function summarizeAppeals(rows: AppealAnalyticsRow[], report: AppealsAnalyticsReport | null) {
-  const total = rows.reduce((sum, row) => sum + row.total, 0);
-  const closed = rows.reduce((sum, row) => sum + row.closed, 0);
-  const open = rows.reduce((sum, row) => sum + row.open, 0);
-  const categories =
-    report?.categoryRows.filter((row) => sumMetricValues(row) > 0).length ?? 0;
-  const couriers = report?.userRows.filter((row) => sumMetricValues(row) > 0).length ?? 0;
-  const qualityTotal = report
-    ? sumMetricValues(report.qualityRows.find((row) => row.key === "total"))
-    : total;
-
-  return { total, closed, open, categories, couriers, qualityTotal };
-}
-
-function sumMetricValues(row: AppealsAnalyticsReport["qualityRows"][number] | undefined) {
-  if (!row) return 0;
-  return Object.values(row.values).reduce<number>(
-    (sum, value) => sum + (typeof value === "number" ? value : 0),
-    0,
-  );
-}
-
 function countSlowMetrics(items: HistoryPageMetric[]) {
-  return items.filter((item) => isSlowMetric(item.currentMs)).length;
-}
-
-function isSlowMetric(ms: number | null | undefined) {
-  return (ms ?? 0) > METRIC_SLOW_MS;
+  return items.filter((item) => isMetricSlow(item.currentMs, item.sourceType)).length;
 }
 
 function DataTileSkeleton() {
@@ -833,7 +531,7 @@ function DataTile({
   selected: boolean;
   onClick: () => void;
 }) {
-  const slow = isSlowMetric(item.currentMs);
+  const slow = isMetricSlow(item.currentMs, item.sourceType);
   return (
     <button
       type="button"
@@ -890,7 +588,13 @@ function MetricLegend({
   );
 }
 
-function WeeklySummaryTable({ rows }: { rows: HistoryPageMetric["weekly"] }) {
+function WeeklySummaryTable({
+  rows,
+  sourceType,
+}: {
+  rows: HistoryPageMetric["weekly"];
+  sourceType: PerformanceSourceType;
+}) {
   return (
     <div className="mt-6 overflow-hidden rounded-xl border border-zinc-800">
       <table className="w-full text-left text-sm">
@@ -906,11 +610,11 @@ function WeeklySummaryTable({ rows }: { rows: HistoryPageMetric["weekly"] }) {
           {rows.map((row) => (
             <tr key={row.label}>
               <td className="px-4 py-3 text-zinc-300">{row.label}</td>
-              <td className={`px-4 py-3 ${isSlowMetric(row.avgMs) ? "font-medium text-amber-300" : "text-zinc-400"}`}>
+              <td className={`px-4 py-3 ${isMetricSlow(row.avgMs, sourceType) ? "font-medium text-amber-300" : "text-zinc-400"}`}>
                 {formatTime(row.avgMs)}
               </td>
               <td className="px-4 py-3 text-zinc-400">{formatTime(row.minMs)}</td>
-              <td className={`px-4 py-3 ${isSlowMetric(row.maxMs) ? "font-medium text-amber-300" : "text-zinc-400"}`}>
+              <td className={`px-4 py-3 ${isMetricSlow(row.maxMs, sourceType) ? "font-medium text-amber-300" : "text-zinc-400"}`}>
                 {formatTime(row.maxMs)}
               </td>
             </tr>
@@ -933,7 +637,13 @@ function ChartSkeleton({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function PerformanceChart({ points }: { points: HistoryChartPoint[] }) {
+function PerformanceChart({
+  points,
+  sourceType,
+}: {
+  points: HistoryChartPoint[];
+  sourceType: PerformanceSourceType;
+}) {
   const width = 760;
   const height = 260;
   const padding = { top: 24, right: 24, bottom: 38, left: 54 };
@@ -982,7 +692,7 @@ function PerformanceChart({ points }: { points: HistoryChartPoint[] }) {
           const showDay = idx % labelStep === 0 || idx === points.length - 1;
           const isMonthStart =
             idx === 0 || new Date(points[idx - 1]?.date ?? point.date).getUTCMonth() !== month;
-          const slow = isSlowMetric(point.valueMs);
+          const slow = isMetricSlow(point.valueMs, sourceType);
           return (
             <g key={point.dayIndex}>
               {point.valueMs == null ? null : (
@@ -1055,13 +765,13 @@ function pageKey(item: HistoryPageMetric): string {
   return `${item.metricName}:${item.app}:${item.page}`;
 }
 
-function defaultAppealsDateFrom() {
+function defaultMonitorDateFrom() {
   const date = new Date();
   date.setDate(date.getDate() - 30);
   return toInputDate(date);
 }
 
-function defaultAppealsDateTo() {
+function defaultMonitorDateTo() {
   return toInputDate(new Date());
 }
 
@@ -1070,14 +780,6 @@ function toInputDate(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-
-function formatAppealsPeriodLabel(from: string, to: string) {
-  const format = (value: string) => {
-    const [year, month, day] = value.split("-");
-    return `${day}.${month}.${year}`;
-  };
-  return `${format(from)} — ${format(to)}`;
 }
 
 function DateRangeFilter({
@@ -1094,7 +796,7 @@ function DateRangeFilter({
   onClear: () => void;
 }) {
   const isDefault =
-    dateFrom === defaultAppealsDateFrom() && dateTo === defaultAppealsDateTo();
+    dateFrom === defaultMonitorDateFrom() && dateTo === defaultMonitorDateTo();
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2">

@@ -1,6 +1,6 @@
 "use client";
 
-import type { Appeal, CourierProfile } from "@/lib/appeals";
+import type { Appeal, CourierProfile, MergeCandidate } from "@/lib/appeals";
 import type { DeliveryPoint } from "@/lib/points";
 import {
   appealNeedsManualClassification,
@@ -50,6 +50,10 @@ export function AppealsClient() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "open" | "in_progress" | "closed">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "max" | "telegram">(() => {
+    const source = searchParams.get("source");
+    return source === "max" || source === "telegram" ? source : "all";
+  });
   const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
   const categoryMenuRef = useRef<HTMLDivElement>(null);
   const [points, setPoints] = useState<DeliveryPoint[]>([]);
@@ -264,6 +268,7 @@ export function AppealsClient() {
 
     return appeals.filter((appeal) => {
       if (courierFilter && appeal.maxUserId !== courierFilter) return false;
+      if (sourceFilter !== "all" && appeal.source !== sourceFilter) return false;
       if (selectedCategories.length > 0 && !selectedCategories.includes(resolveAppealCategoryKey(appeal))) {
         return false;
       }
@@ -284,7 +289,7 @@ export function AppealsClient() {
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [appeals, courierFilter, search, selectedCategories, dateFrom, dateTo]);
+  }, [appeals, courierFilter, sourceFilter, search, selectedCategories, dateFrom, dateTo]);
 
   const visibleAppeals = useMemo(() => {
     return baseFilteredAppeals.filter((appeal) => {
@@ -352,6 +357,21 @@ export function AppealsClient() {
           value={totalCount}
           active={statusFilter === "all"}
           onClick={() => setStatusFilter("all")}
+        />
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <span className="text-xs text-zinc-500">Источник:</span>
+        <SourceFilterButton label="Все" active={sourceFilter === "all"} onClick={() => setSourceFilter("all")} />
+        <SourceFilterButton
+          label="Обращения курьеров"
+          active={sourceFilter === "max"}
+          onClick={() => setSourceFilter("max")}
+        />
+        <SourceFilterButton
+          label="Обращения в техническую поддержку"
+          active={sourceFilter === "telegram"}
+          onClick={() => setSourceFilter("telegram")}
         />
       </div>
 
@@ -508,8 +528,17 @@ export function AppealsClient() {
                           />
 
                           {appeal.photoUrl ? (
-                            <a href={appeal.photoUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-sm text-sky-400 hover:text-sky-300">
-                              Открыть фото
+                            <a
+                              href={appeal.photoUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-3 block max-w-xl"
+                            >
+                              <img
+                                src={appeal.photoUrl}
+                                alt="Фото обращения"
+                                className="max-h-80 w-full rounded-lg border border-zinc-800 object-contain bg-zinc-900"
+                              />
                             </a>
                           ) : null}
 
@@ -521,6 +550,10 @@ export function AppealsClient() {
 
                           <MessageHistory appeal={appeal} />
                           <MergedContour appeals={appeal.mergedAppeals} />
+
+                          {!mergeMode ? (
+                            <AppealMergePanel appeal={appeal} onMerged={() => void loadAppeals()} />
+                          ) : null}
 
                           {mergeMode ? (
                             <MergePanel
@@ -584,7 +617,7 @@ function Header({
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div>
-        <p className="text-xs text-zinc-600">MAX · Telegram · обращения курьеров</p>
+        <p className="text-xs text-zinc-600">Курьеры · техническая поддержка</p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Обращения</h1>
         {unreadTotal > 0 ? (
           <p className="mt-2 text-sm text-sky-300">
@@ -734,13 +767,44 @@ function AppealClassificationEditor({
   );
 }
 
-function SourceBadge({ source }: { source: string }) {
-  const label = source === "telegram" ? "Telegram" : source === "max" ? "MAX" : source;
+function SourceFilterButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
-    <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-xs text-zinc-400">
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        active
+          ? "rounded-lg border border-sky-400/50 bg-sky-500/10 px-3 py-1.5 text-sm text-sky-100"
+          : "rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-zinc-500 hover:text-white"
+      }
+    >
       {label}
-    </span>
+    </button>
   );
+}
+
+function SourceBadge({ source }: { source: string }) {
+  const label =
+    source === "telegram"
+      ? "Техподдержка"
+      : source === "max"
+        ? "Курьеры"
+        : source;
+  const className =
+    source === "telegram"
+      ? "rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-200"
+      : source === "max"
+        ? "rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-xs text-violet-200"
+        : "rounded-full border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-xs text-zinc-400";
+  return <span className={className}>{label}</span>;
 }
 
 function StatusBadge({ appeal }: { appeal: Appeal }) {
@@ -963,6 +1027,160 @@ function MergedContour({ appeals }: { appeals: Appeal[] }) {
   );
 }
 
+function AppealMergePanel({ appeal, onMerged }: { appeal: Appeal; onMerged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [candidates, setCandidates] = useState<MergeCandidate[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [merging, setMerging] = useState(false);
+
+  const selectedCount = Object.values(selectedIds).filter(Boolean).length;
+  const hasContour = appeal.mergedAppeals.length > 0;
+
+  async function loadCandidates() {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/appeals/${appeal.id}/merge-candidates`, { cache: "no-store" });
+      if (!response.ok) {
+        setError("Не удалось загрузить список обращений");
+        return;
+      }
+      const data = (await response.json()) as { candidates: MergeCandidate[] };
+      setCandidates(data.candidates);
+      setSelectedIds({});
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openPanel() {
+    setOpen(true);
+    await loadCandidates();
+  }
+
+  async function runMerge(ids: string[]) {
+    if (ids.length === 0) {
+      setError("Выберите обращения для объединения");
+      return;
+    }
+    setMerging(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/appeals/${appeal.id}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appealIds: ids }),
+      });
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        setError(data?.error ?? "Не удалось объединить");
+        return;
+      }
+      setOpen(false);
+      setSelectedIds({});
+      onMerged();
+    } finally {
+      setMerging(false);
+    }
+  }
+
+  return (
+    <div className="mt-4">
+      <button
+        type="button"
+        onClick={() => void (open ? setOpen(false) : openPanel())}
+        className={
+          open
+            ? "rounded-lg border border-violet-400/50 bg-violet-500/15 px-4 py-2 text-sm text-violet-100"
+            : "rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:border-violet-400/60"
+        }
+      >
+        {open ? "Скрыть объединение" : "Объединить обращения"}
+        {hasContour ? ` · контур ${appeal.mergedAppeals.length + 1}` : ""}
+      </button>
+
+      {open ? (
+        <div className="mt-3 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium text-violet-100">
+              Дубли сотрудника к №{appeal.appealNumber}
+            </div>
+            {candidates.length > 0 ? (
+              <button
+                type="button"
+                disabled={merging}
+                onClick={() => void runMerge(candidates.map((item) => item.id))}
+                className="text-xs text-violet-200 underline hover:text-white disabled:opacity-40"
+              >
+                Объединить все ({candidates.length})
+              </button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-violet-100/80">
+            Выберите другие обращения этого сотрудника — история и сообщения перейдут в текущую карточку.
+            Сотрудник получит уведомление в Telegram или MAX.
+          </p>
+          {loading ? (
+            <p className="mt-3 text-xs text-violet-200/70">Загружаем список…</p>
+          ) : candidates.length === 0 ? (
+            <p className="mt-3 text-xs text-violet-200/70">
+              Других обращений этого сотрудника для объединения нет.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {candidates.map((candidate) => (
+                <li key={candidate.id}>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-violet-500/20 bg-zinc-950/60 px-3 py-2 hover:border-violet-400/30">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selectedIds[candidate.id])}
+                      onChange={(event) =>
+                        setSelectedIds((current) => ({
+                          ...current,
+                          [candidate.id]: event.target.checked,
+                        }))
+                      }
+                      className="mt-1 rounded border-zinc-600 bg-zinc-900 text-violet-500"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="text-sm font-medium text-violet-50">№{candidate.appealNumber}</span>
+                      <span className="ml-2 text-xs text-violet-200/70">
+                        {new Date(candidate.createdAt).toLocaleString("ru-RU")}
+                        {candidate.status === "closed" ? " · закрыто" : ""}
+                        {candidate.status === "in_progress" ? " · в работе" : ""}
+                      </span>
+                      <span className="mt-1 block text-xs text-violet-100/80">{candidate.issuePreview}</span>
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+          {error ? <p className="mt-2 text-xs text-rose-300">{error}</p> : null}
+          {candidates.length > 0 ? (
+            <button
+              type="button"
+              disabled={merging || selectedCount === 0}
+              onClick={() =>
+                void runMerge(
+                  Object.entries(selectedIds)
+                    .filter(([, checked]) => checked)
+                    .map(([id]) => id),
+                )
+              }
+              className="mt-3 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400 disabled:opacity-40"
+            >
+              {merging ? "Объединяем…" : `Объединить выбранные (${selectedCount})`}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MergeToolbar({
   primary,
   secondaryCount,
@@ -1064,6 +1282,15 @@ function MessageHistory({ appeal }: { appeal: Appeal }) {
               {new Date(message.createdAt).toLocaleString("ru-RU")} · {message.direction}
             </span>
             <div className="mt-1 whitespace-pre-wrap text-zinc-300">{message.text}</div>
+            {message.photoUrl ? (
+              <a href={message.photoUrl} target="_blank" rel="noreferrer" className="mt-2 block max-w-sm">
+                <img
+                  src={message.photoUrl}
+                  alt="Фото"
+                  className="max-h-48 w-full rounded-lg border border-zinc-800 object-contain bg-zinc-900"
+                />
+              </a>
+            ) : null}
           </div>
         ))}
       </div>
@@ -1089,7 +1316,7 @@ function CourierCard({
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-medium text-white">Карточка курьера</div>
         {appeal.maxUserId ? (
-          <Link href={`/dashboard/couriers?search=${encodeURIComponent(draft.lastName || draft.phone || appeal.maxUserId)}`} className="text-xs text-sky-400 hover:text-sky-300">
+          <Link href={`/dashboard/employees?search=${encodeURIComponent(draft.lastName || draft.phone || appeal.maxUserId)}`} className="text-xs text-sky-400 hover:text-sky-300">
             В базе
           </Link>
         ) : null}

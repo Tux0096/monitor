@@ -1,5 +1,9 @@
 import { auth } from "@/auth";
-import { readAppealAnalytics, readAppealsAnalyticsReport } from "@/lib/appeals";
+import {
+  readAppealAnalytics,
+  readAppealsAnalyticsReport,
+  type AppealsAnalyticsRange,
+} from "@/lib/appeals";
 
 export const runtime = "nodejs";
 
@@ -12,11 +16,14 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
-  const range = { from, to };
+  const sourceParam = url.searchParams.get("source");
+  const source =
+    sourceParam === "max" || sourceParam === "telegram" ? sourceParam : null;
+  const range: AppealsAnalyticsRange = { from, to, source };
 
   const [rows, report] = await Promise.all([
     readAppealAnalytics(range),
     readAppealsAnalyticsReport(range),
   ]);
-  return Response.json({ rows, report, from, to });
+  return Response.json({ rows, report, from, to, source });
 }
