@@ -523,20 +523,35 @@ async function probeOnce(
   target: ProbeTarget,
   userAgent: string,
 ): Promise<ProbeSample> {
+  // Раньше здесь был AbortSignal.timeout(). Он создаёт таймер, который живёт
+  // до самого срабатывания даже после успешного ответа, а undici вешает на
+  // сигнал слушатель отмены. При замере каждые 10 минут (8 целей × 3 сэмпла)
+  // эти таймеры и слушатели копились в процессе, нагружали event loop и
+  // напрямую раздували измеряемое время: значения росли на ~10 % в сутки и
+  // сбрасывались только при перезапуске pm2. Мониторинг мерил собственную
+  // деградацию, а не сайт.
+  //
+  // AbortController с гарантированным clearTimeout освобождает таймер сразу.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   const start = performance.now();
-  const response = await fetch(target.url, {
-    redirect: "follow",
-    cache: "no-store",
-    headers: { "user-agent": userAgent, accept: "*/*", ...target.headers },
-    signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-  });
-  const ttfbMs = performance.now() - start;
-  await response.arrayBuffer();
-  const totalMs = performance.now() - start;
-  const ok = target.requireOk
-    ? response.ok
-    : response.ok || (response.status >= 300 && response.status < 400);
-  return { ttfbMs, totalMs, ok, status: response.status };
+  try {
+    const response = await fetch(target.url, {
+      redirect: "follow",
+      cache: "no-store",
+      headers: { "user-agent": userAgent, accept: "*/*", ...target.headers },
+      signal: controller.signal,
+    });
+    const ttfbMs = performance.now() - start;
+    await response.arrayBuffer();
+    const totalMs = performance.now() - start;
+    const ok = target.requireOk
+      ? response.ok
+      : response.ok || (response.status >= 300 && response.status < 400);
+    return { ttfbMs, totalMs, ok, status: response.status };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function probeTarget(
