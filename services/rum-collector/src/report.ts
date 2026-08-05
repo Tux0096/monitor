@@ -48,7 +48,10 @@ function resolveRange(from?: string, to?: string) {
     from && !Number.isNaN(Date.parse(from))
       ? new Date(from)
       : new Date(end.getTime() - 7 * 86_400_000);
-  return { start, end };
+  // В запросы передаём ISO-строки с явным приведением ::timestamptz.
+  // postgres.js не всегда выводит тип для Date внутри выражений с OR/IS NULL
+  // и падает на этапе Bind.
+  return { start, end, startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
 export async function readRumReport(input: {
@@ -57,7 +60,7 @@ export async function readRumReport(input: {
   source?: string | null;
   platform?: string | null;
 }): Promise<RumReport> {
-  const { start, end } = resolveRange(input.from, input.to);
+  const { start, end, startIso, endIso } = resolveRange(input.from, input.to);
   const source = input.source || null;
   const platform = input.platform || null;
 
@@ -74,9 +77,9 @@ export async function readRumReport(input: {
       sum(p95 * samples) / NULLIF(sum(samples), 0) AS p95,
       sum(samples)::int AS samples
     FROM rum_rollup_hourly
-    WHERE hour >= ${start} AND hour <= ${end}
-      AND (${source}::text IS NULL OR source = ${source})
-      AND (${platform}::text IS NULL OR platform = ${platform})
+    WHERE hour >= ${startIso}::timestamptz AND hour <= ${endIso}::timestamptz
+      AND (${source}::text IS NULL OR source = ${source}::text)
+      AND (${platform}::text IS NULL OR platform = ${platform}::text)
     GROUP BY metric
   `) as Array<{
     metric: RumMetric;
@@ -109,9 +112,9 @@ export async function readRumReport(input: {
       sum(p75 * samples) / NULLIF(sum(samples), 0) AS p75,
       sum(samples)::int AS samples
     FROM rum_rollup_hourly
-    WHERE hour >= ${start} AND hour <= ${end}
-      AND (${source}::text IS NULL OR source = ${source})
-      AND (${platform}::text IS NULL OR platform = ${platform})
+    WHERE hour >= ${startIso}::timestamptz AND hour <= ${endIso}::timestamptz
+      AND (${source}::text IS NULL OR source = ${source}::text)
+      AND (${platform}::text IS NULL OR platform = ${platform}::text)
     GROUP BY path_group, metric
     HAVING sum(samples) >= 20
     ORDER BY sum(samples) DESC
@@ -125,9 +128,9 @@ export async function readRumReport(input: {
       sum(p75 * samples) / NULLIF(sum(samples), 0) AS p75,
       sum(samples)::int AS samples
     FROM rum_rollup_hourly
-    WHERE hour >= ${start} AND hour <= ${end}
-      AND (${source}::text IS NULL OR source = ${source})
-      AND (${platform}::text IS NULL OR platform = ${platform})
+    WHERE hour >= ${startIso}::timestamptz AND hour <= ${endIso}::timestamptz
+      AND (${source}::text IS NULL OR source = ${source}::text)
+      AND (${platform}::text IS NULL OR platform = ${platform}::text)
     GROUP BY hour, metric
     ORDER BY hour ASC
   `) as RumReport["timeline"];
@@ -135,7 +138,7 @@ export async function readRumReport(input: {
   const platforms = (await sql`
     SELECT platform, source, sum(samples)::int AS samples
     FROM rum_rollup_hourly
-    WHERE hour >= ${start} AND hour <= ${end}
+    WHERE hour >= ${startIso}::timestamptz AND hour <= ${endIso}::timestamptz
     GROUP BY platform, source
     ORDER BY samples DESC
   `) as RumReport["platforms"];
