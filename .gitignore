@@ -26,7 +26,10 @@ node_modules/
 *.pem
 deploy_bundle.tar.gz
 deploy_bundle_*.tar.gz
+push_deploy.tar.gz
+push_deploy*.tar.gz
 infra_bundle.tar.gz
+.claude/
 .cursor/*
 !.cursor/rules/
 !.cursor/rules/**
