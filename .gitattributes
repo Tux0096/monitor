@@ -1,0 +1,10 @@
+# Скрипты выполняются на Linux-сервере: CRLF ломает shebang и
+# `set -euo pipefail` («set: pipefail: invalid option name»,
+# «-p: command not found»). Всегда храним и выгружаем их с LF,
+# независимо от настроек core.autocrlf на машине разработчика.
+*.sh text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
