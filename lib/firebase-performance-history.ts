@@ -44,6 +44,25 @@ type GoogleAuthClient = ResolvedGoogleAuth["auth"];
 
 export type PerformanceSourceType = "site" | "mobile" | "mobile_api";
 
+/**
+ * Не все строки таблицы — длительности. Performance Score от PageSpeed это
+ * балл 0–100, у которого «больше» означает «лучше». Раньше он лежал в том же
+ * поле avg_ms и попадал и в средние, и в сортировку, и в сравнение с порогом
+ * 1300 мс — из-за этого показатели сайта считались неверно.
+ */
+export type PerformanceMetricKind = "duration" | "score";
+
+export const SCORE_METRIC_NAMES = new Set(["Performance Score"]);
+
+export function getMetricKind(metricName: string): PerformanceMetricKind {
+  return SCORE_METRIC_NAMES.has(metricName) ? "score" : "duration";
+}
+
+/** PageSpeed — лабораторный замер на эмулированном 4G, а не реальное время отклика. */
+export function isLabMeasurement(app: string): boolean {
+  return app.startsWith("pagespeed:");
+}
+
 export type StoredPerformanceMetric = {
   metricName: string;
   sourceType: PerformanceSourceType;
@@ -73,6 +92,9 @@ export type HistoryPageMetric = {
   app: string;
   page: string;
   sourceType: PerformanceSourceType;
+  metricKind: PerformanceMetricKind;
+  /** true для лабораторных замеров PageSpeed — их нельзя мерить порогом live-проб. */
+  isLab: boolean;
   currentMs: number | null;
   previousMs: number | null;
   deltaPercent: number | null;
@@ -161,44 +183,34 @@ export async function importMissingFirebasePerformanceDays(
   return imported;
 }
 
-export async function importPageSpeedDay(day: string) {
+/**
+ * PageSpeed Insights меряет сайт в момент вызова — исторического режима у API нет.
+ * Поэтому импортировать можно только текущий день: любая другая дата означала бы
+ * запись сегодняшнего замера под чужой датой.
+ */
+export async function importPageSpeedToday() {
   await ensurePerformanceHistorySchema();
+  const day = toDateString(startOfUtcDay(new Date()));
   const rows = await queryPageSpeedDay(day);
   await insertPerformanceRows(rows);
   return { day, insertedOrExisting: rows.length };
 }
 
-export async function importMissingPageSpeedDays(from: string, to: string, force = false) {
-  await ensurePerformanceHistorySchema();
-  const days = enumerateClosedDays(from, to);
-  const imported: Array<{ day: string; insertedOrExisting: number; error?: string }> = [];
-
-  for (const day of days) {
-    if (!force) {
-      const exists = await sql()`
-        SELECT 1
-        FROM firebase_performance_daily
-        WHERE source_type = 'site'
-          AND day = ${day}
-        LIMIT 1
-      `;
-      if (exists.length > 0) {
-        imported.push({ day, insertedOrExisting: 0 });
-        continue;
-      }
-    }
-    try {
-      imported.push(await importPageSpeedDay(day));
-    } catch (error) {
-      imported.push({
-        day,
-        insertedOrExisting: 0,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+/**
+ * @deprecated Бэкфилл PageSpeed невозможен — API не отдаёт исторические данные.
+ * Раньше эта функция записывала сегодняшний замер под каждую прошедшую дату,
+ * из-за чего график динамики сайта был вымышленным. Для реальной истории
+ * нужен CrUX API (chromeuxreport.googleapis.com), у него есть исторический эндпоинт.
+ */
+export async function importMissingPageSpeedDays(from: string, to: string) {
+  const today = toDateString(startOfUtcDay(new Date()));
+  if (from !== today || to !== today) {
+    throw new Error(
+      "PageSpeed API не отдаёт исторические данные: бэкфилл за прошедшие даты " +
+        "записал бы сегодняшний замер под чужой датой. Используйте importPageSpeedToday().",
+    );
   }
-
-  return imported;
+  return [await importPageSpeedToday()];
 }
 
 export async function readPerformanceHistoryReport(
@@ -742,7 +754,7 @@ function buildPageMetrics(
     new Set(rows.map((row) => `${row.metricName}:${row.app}:${row.page}`)),
   );
 
-  return pageKeys
+  const metrics = pageKeys
     .map((key) => {
       const pageRows = rows.filter(
         (row) => `${row.metricName}:${row.app}:${row.page}` === key,
@@ -764,6 +776,8 @@ function buildPageMetrics(
         app: first.app,
         page: first.page,
         sourceType: first.sourceType,
+        metricKind: getMetricKind(first.metricName),
+        isLab: isLabMeasurement(first.app),
         currentMs,
         previousMs,
         deltaPercent:
@@ -775,9 +789,44 @@ function buildPageMetrics(
         weekly: buildWeeklySummary(currentRows, range),
       };
     })
-    .filter((row) => row.currentMs != null)
-    .sort((a, b) => (b.currentMs ?? 0) - (a.currentMs ?? 0))
-    .slice(0, 24);
+    .filter((row) => row.currentMs != null);
+
+  // Лимит применяется внутри каждого источника. Раньше глобальный slice(0, 24)
+  // после сортировки по убыванию отдавал почти все слоты лабораторным метрикам
+  // PageSpeed (2000–6000 мс), и live-пробы сайта (100–800 мс) до дашборда
+  // просто не доходили.
+  return limitPerSource(metrics, PAGE_METRICS_LIMIT_PER_SOURCE);
+}
+
+const PAGE_METRICS_LIMIT_PER_SOURCE = 12;
+
+function limitPerSource(
+  metrics: HistoryPageMetric[],
+  limitPerSource: number,
+): HistoryPageMetric[] {
+  const bySource = new Map<PerformanceSourceType, HistoryPageMetric[]>();
+  for (const metric of metrics) {
+    const bucket = bySource.get(metric.sourceType) ?? [];
+    bucket.push(metric);
+    bySource.set(metric.sourceType, bucket);
+  }
+
+  const result: HistoryPageMetric[] = [];
+  for (const bucket of bySource.values()) {
+    const sorted = bucket.sort((a, b) => {
+      // Баллы и длительности сортируются по разным правилам:
+      // у длительности «хуже» = больше, у балла «хуже» = меньше.
+      if (a.metricKind !== b.metricKind) {
+        return a.metricKind === "duration" ? -1 : 1;
+      }
+      if (a.metricKind === "score") {
+        return (a.currentMs ?? 0) - (b.currentMs ?? 0);
+      }
+      return (b.currentMs ?? 0) - (a.currentMs ?? 0);
+    });
+    result.push(...sorted.slice(0, limitPerSource));
+  }
+  return result;
 }
 
 function buildChart(

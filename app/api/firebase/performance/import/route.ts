@@ -1,7 +1,7 @@
 import { auth } from "@/auth";
 import {
   importMissingFirebasePerformanceDays,
-  importMissingPageSpeedDays,
+  importPageSpeedToday,
   importSyntheticProbes,
 } from "@/lib/firebase-performance-history";
 import { resolveGoogleApiAuth } from "@/lib/google-auth";
@@ -35,10 +35,12 @@ export async function POST(request: Request) {
     probeError = e instanceof Error ? e.message : String(e);
   }
 
+  // PageSpeed всегда пишется только за сегодня: API отдаёт замер «сейчас»,
+  // историю по нему получить нельзя. Диапазон from/to к нему не применяется.
   let pageSpeed: unknown = null;
   let pageSpeedError: string | null = null;
   try {
-    pageSpeed = await importMissingPageSpeedDays(from, to, force);
+    pageSpeed = await importPageSpeedToday();
   } catch (e) {
     pageSpeedError = e instanceof Error ? e.message : String(e);
   }

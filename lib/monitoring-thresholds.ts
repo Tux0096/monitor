@@ -24,3 +24,21 @@ export function isMetricSlow(
 ): boolean {
   return (ms ?? 0) > getMetricSlowMs(sourceType);
 }
+
+/**
+ * Порог в миллисекундах применим только к длительностям живых замеров.
+ * Балл (Performance Score, 0–100) и лабораторные прогоны PageSpeed
+ * под него не подпадают. Дублирует логику
+ * services/push-notification-service/src/thresholds.ts — обе копии
+ * подлежат переносу в packages/contracts.
+ */
+export function isAlertableMetric(metric: {
+  metricKind?: "duration" | "score";
+  isLab?: boolean;
+  app?: string;
+}): boolean {
+  if (metric.metricKind === "score") return false;
+  if (metric.isLab === true) return false;
+  if (metric.isLab === undefined && metric.app?.startsWith("pagespeed:")) return false;
+  return true;
+}
