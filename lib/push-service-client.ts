@@ -72,13 +72,46 @@ export async function notifyPushService(body: {
   cooldownMinutes?: number;
   dedupeKey?: string;
 }): Promise<void> {
+  // Отправка best-effort — ошибка push не должна ронять основной сценарий.
+  // Но молча глотать её нельзя: именно из-за этого «пуши не приходят»
+  // раньше невозможно было диагностировать.
   try {
-    await pushServiceFetch("/push/v1/notify", {
+    const response = await pushServiceFetch("/push/v1/notify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch {
-    // push is best-effort
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      console.error(
+        `[push] notify failed: ${response.status} ${text.slice(0, 300)}`,
+        { domain: body.domain, dedupeKey: body.dedupeKey },
+      );
+      return;
+    }
+
+    const result = (await response.json().catch(() => null)) as {
+      sent?: number;
+      failed?: number;
+      pruned?: number;
+      tokens?: number;
+      skipped?: boolean;
+      errors?: string[];
+    } | null;
+
+    if (result && !result.skipped && (result.failed ?? 0) > 0) {
+      console.warn(
+        `[push] notify: доставлено ${result.sent ?? 0}/${result.tokens ?? 0}, ` +
+          `ошибок ${result.failed}, удалено протухших ${result.pruned ?? 0}`,
+        result.errors?.slice(0, 3),
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[push] notify недоступен:",
+      error instanceof Error ? error.message : error,
+      { domain: body.domain, dedupeKey: body.dedupeKey },
+    );
   }
 }

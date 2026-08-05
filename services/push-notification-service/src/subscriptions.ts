@@ -67,6 +67,39 @@ export async function markPushAlertSent(alertKey: string) {
     });
 }
 
+export async function describeSubscriptionsHealth(): Promise<{
+  total: number;
+  activeLast7Days: number;
+  staleOver30Days: number;
+  byPlatform: Array<{ platform: string; count: number }>;
+  lastSeenAt: string | null;
+}> {
+  const [totals] = await db
+    .select({
+      total: sql<number>`count(*)::int`,
+      activeLast7Days: sql<number>`count(*) FILTER (WHERE ${pushSubscriptions.lastSeenAt} > now() - interval '7 days')::int`,
+      staleOver30Days: sql<number>`count(*) FILTER (WHERE ${pushSubscriptions.lastSeenAt} < now() - interval '30 days')::int`,
+      lastSeenAt: sql<string | null>`max(${pushSubscriptions.lastSeenAt})::text`,
+    })
+    .from(pushSubscriptions);
+
+  const byPlatform = await db
+    .select({
+      platform: sql<string>`coalesce(${pushSubscriptions.platform}, 'unknown')`,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(pushSubscriptions)
+    .groupBy(sql`coalesce(${pushSubscriptions.platform}, 'unknown')`);
+
+  return {
+    total: totals?.total ?? 0,
+    activeLast7Days: totals?.activeLast7Days ?? 0,
+    staleOver30Days: totals?.staleOver30Days ?? 0,
+    byPlatform,
+    lastSeenAt: totals?.lastSeenAt ?? null,
+  };
+}
+
 export async function countPushSubscriptions(): Promise<number> {
   const rows = await db
     .select({ count: sql<number>`count(*)::int` })

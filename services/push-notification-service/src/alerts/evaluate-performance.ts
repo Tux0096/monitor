@@ -8,6 +8,7 @@ import {
 import {
   DASHBOARD_TAB_URLS,
   getMetricSlowLabel,
+  isAlertableMetric,
   isMetricSlow,
   PERFORMANCE_TAB_LABELS,
   resolveAlertUrl,
@@ -27,8 +28,8 @@ export async function evaluatePerformanceReport(
   tokens: number;
   errors: string[];
 }> {
-  const slowItems = report.pages.filter((page) =>
-    isMetricSlow(page.currentMs, page.sourceType),
+  const slowItems = report.pages.filter(
+    (page) => isAlertableMetric(page) && isMetricSlow(page.currentMs, page.sourceType),
   );
   const tokens = await listPushTokens();
 

@@ -6,6 +6,26 @@ export const METRIC_SLOW_MS_BY_SOURCE: Record<PerformanceSourceType, number> = {
   mobile_api: 1100,
 };
 
+/**
+ * Порог применим только к длительностям живых замеров.
+ *
+ * - Performance Score — балл 0–100, у него «больше» = лучше; сравнение с 1300 мс
+ *   бессмысленно.
+ * - PageSpeed (app = "pagespeed:*") — лабораторный прогон на эмулированном 4G,
+ *   LCP там штатно 2000–6000 мс. Под порогом 1300 мс он «медленный» всегда,
+ *   что давало ложный алерт каждые 10 минут.
+ */
+export function isAlertableMetric(metric: {
+  metricKind?: "duration" | "score";
+  isLab?: boolean;
+  app?: string;
+}): boolean {
+  if (metric.metricKind === "score") return false;
+  if (metric.isLab === true) return false;
+  if (metric.isLab === undefined && metric.app?.startsWith("pagespeed:")) return false;
+  return true;
+}
+
 export const PERFORMANCE_TAB_LABELS: Record<PerformanceSourceType, string> = {
   site: "Сайт",
   mobile: "Приложение",

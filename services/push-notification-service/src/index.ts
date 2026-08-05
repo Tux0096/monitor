@@ -11,6 +11,7 @@ import { getPushFirebaseWebConfig } from "./config.js";
 import { buildMessagingServiceWorker } from "./messaging-sw.js";
 import {
   countPushSubscriptions,
+  describeSubscriptionsHealth,
   removePushSubscription,
   upsertPushSubscription,
 } from "./subscriptions.js";
@@ -31,6 +32,15 @@ export async function buildApp() {
     subscriptions: await countPushSubscriptions(),
     pushEnabled: Boolean(getPushFirebaseWebConfig()),
   }));
+
+  // Диагностика подписок: без неё «пуши не приходят» отлаживается только
+  // по логам контейнера.
+  app.get("/push/v1/subscriptions/health", async (req, reply) => {
+    if (!verifyServiceSecret(req.headers["x-monitor-import-secret"])) {
+      return reply.status(401).send({ error: "Unauthorized" });
+    }
+    return describeSubscriptionsHealth();
+  });
 
   app.get("/push/v1/config", async () => {
     const config = getPushFirebaseWebConfig();
