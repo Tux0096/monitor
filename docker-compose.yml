@@ -84,6 +84,33 @@ services:
       timeout: 5s
       retries: 5
 
+  rum-collector:
+    build:
+      context: ./services/rum-collector
+      dockerfile: Dockerfile
+    container_name: monitor-rum-collector
+    restart: unless-stopped
+    networks:
+      - monitor-net
+    depends_on:
+      monitor-postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3105"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-monitor}:${POSTGRES_PASSWORD}@monitor-postgres:5432/monitor_core
+      PERFORMANCE_IMPORT_SECRET: ${PERFORMANCE_IMPORT_SECRET:-}
+      # Пропущенный origin = данные с этой платформы молча теряются.
+      RUM_ALLOWED_ORIGINS: ${RUM_ALLOWED_ORIGINS:-https://fuji.ru,https://www.fuji.ru,https://app.fuji.ru,capacitor://localhost,http://localhost,ionic://localhost}
+      RUM_RAW_RETENTION_DAYS: ${RUM_RAW_RETENTION_DAYS:-14}
+    ports:
+      - "127.0.0.1:3105:3105"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3105/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   monitor-net:
     name: monitor-net

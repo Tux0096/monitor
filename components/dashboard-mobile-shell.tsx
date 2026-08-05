@@ -15,6 +15,7 @@ const primaryNav: NavItem[] = [
   { href: "/dashboard", label: "Аналитика", shortLabel: "Аналитика" },
   { href: "/dashboard/appeals", label: "Обращения", shortLabel: "Обращения" },
   { href: "/dashboard/statistics", label: "Статистика", shortLabel: "Стат." },
+  { href: "/dashboard/rum", label: "Скорость загрузки", shortLabel: "Скорость" },
   { href: "/dashboard/appeals-report", label: "Отчёт IT", shortLabel: "IT" },
   { href: "/dashboard/courier-report", label: "Отчёт курьерское приложение", shortLabel: "Курьеры" },
 ];
