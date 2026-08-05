@@ -4,6 +4,7 @@ import type { Appeal, CourierProfile, MergeCandidate } from "@/lib/appeals";
 import type { DeliveryPoint } from "@/lib/points";
 import {
   appealNeedsManualClassification,
+  getAppealCategoryDisplay,
   getCategoryLabel,
   resolveAppealCategoryKey,
   SUPPORT_CATEGORY_CATALOG,
@@ -29,16 +30,17 @@ type CourierDraft = Pick<
 type AppealDraft = {
   issueText: string;
   resultText: string;
-  operatorReply: string;
   pointId: string;
 };
 
 export function AppealsClient() {
   const searchParams = useSearchParams();
   const courierFilter = searchParams.get("courier");
+  const appealNumberParam = searchParams.get("appeal");
   const [appeals, setAppeals] = useState<Appeal[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [openedFromLink, setOpenedFromLink] = useState(false);
   const [courierDrafts, setCourierDrafts] = useState<Record<string, CourierDraft>>({});
   const [appealDrafts, setAppealDrafts] = useState<Record<string, AppealDraft>>({});
   const [mergeSelection, setMergeSelection] = useState<Record<string, boolean>>({});
@@ -49,11 +51,14 @@ export function AppealsClient() {
   const [selectedCategories, setSelectedCategories] = useState<SupportCategory[]>([]);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "open" | "in_progress" | "closed">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "open" | "closed">(() =>
+    searchParams.get("appeal") ? "all" : "open",
+  );
   const [sourceFilter, setSourceFilter] = useState<"all" | "max" | "telegram">(() => {
     const source = searchParams.get("source");
     return source === "max" || source === "telegram" ? source : "all";
   });
+  const [pendingCategories, setPendingCategories] = useState<Record<string, SupportCategory>>({});
   const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
   const categoryMenuRef = useRef<HTMLDivElement>(null);
   const [points, setPoints] = useState<DeliveryPoint[]>([]);
@@ -90,6 +95,18 @@ export function AppealsClient() {
       void markAppealRead(expandedId);
     }
   }, [expandedId, appeals]);
+
+  useEffect(() => {
+    if (!appealNumberParam || openedFromLink || appeals.length === 0) return;
+    const target = appeals.find((item) => String(item.appealNumber) === appealNumberParam);
+    if (!target) return;
+    setOpenedFromLink(true);
+    setExpandedId(target.id);
+    void markAppealRead(target.id);
+    requestAnimationFrame(() => {
+      document.getElementById(`appeal-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [appealNumberParam, appeals, openedFromLink]);
 
   function toggleCategory(key: SupportCategory) {
     setSelectedCategories((current) =>
@@ -150,12 +167,38 @@ export function AppealsClient() {
   }
 
   async function closeWithResolution(id: string, resultText: string) {
+    const category = pendingCategories[id];
     const response = await fetch(`/api/appeals/${id}/close`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resultText }),
+      body: JSON.stringify({
+        resultText,
+        ...(category ? { category } : {}),
+      }),
     });
     if (response.ok) await loadAppeals();
+  }
+
+  async function saveAppealPoint(appealId: string, pointId: string | null) {
+    const response = await fetch(`/api/appeals/${appealId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pointId }),
+    });
+    if (!response.ok) return false;
+
+    const data = (await response.json()) as { appeal: Appeal };
+    setAppeals((current) =>
+      current.map((item) => (item.id === appealId ? data.appeal : item)),
+    );
+    setAppealDrafts((current) => ({
+      ...current,
+      [appealId]: {
+        ...(current[appealId] ?? toAppealDraft(data.appeal)),
+        pointId: data.appeal.pointId ?? "",
+      },
+    }));
+    return true;
   }
 
   async function saveAppeal(appeal: Appeal, options?: { status?: Appeal["status"] }) {
@@ -167,12 +210,24 @@ export function AppealsClient() {
       body: JSON.stringify({
         issueText: draft.issueText,
         resultText: draft.resultText,
-        operatorReply: draft.operatorReply,
         pointId: draft.pointId || null,
         status: options?.status,
       }),
     });
     if (response.ok) await loadAppeals();
+  }
+
+  async function sendOperatorReply(id: string, text: string) {
+    const response = await fetch(`/api/appeals/${id}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(data?.error ?? "Не удалось отправить ответ в чат");
+    }
+    await loadAppeals();
   }
 
   async function reopenAppeal(id: string) {
@@ -294,14 +349,12 @@ export function AppealsClient() {
   const visibleAppeals = useMemo(() => {
     return baseFilteredAppeals.filter((appeal) => {
       if (statusFilter === "open" && appeal.status !== "open") return false;
-      if (statusFilter === "in_progress" && appeal.status !== "in_progress") return false;
       if (statusFilter === "closed" && appeal.status !== "closed") return false;
       return true;
     });
   }, [baseFilteredAppeals, statusFilter]);
 
   const openCount = baseFilteredAppeals.filter((a) => a.status === "open").length;
-  const inProgressCount = baseFilteredAppeals.filter((a) => a.status === "in_progress").length;
   const closedCount = baseFilteredAppeals.filter((a) => a.status === "closed").length;
   const totalCount = baseFilteredAppeals.length;
   const unreadTotal = baseFilteredAppeals.reduce((sum, appeal) => sum + (appeal.unreadCount ?? 0), 0);
@@ -333,18 +386,12 @@ export function AppealsClient() {
         onRefresh={() => void loadAppeals()}
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <SummaryCard
-          label="Новые"
+          label="Открытые"
           value={openCount}
           active={statusFilter === "open"}
           onClick={() => setStatusFilter("open")}
-        />
-        <SummaryCard
-          label="В работе"
-          value={inProgressCount}
-          active={statusFilter === "in_progress"}
-          onClick={() => setStatusFilter("in_progress")}
         />
         <SummaryCard
           label="Закрытые"
@@ -415,11 +462,12 @@ export function AppealsClient() {
             {visibleAppeals.map((appeal) => {
               const expanded = expandedId === appeal.id;
               const categoryKey = resolveAppealCategoryKey(appeal);
-              const categoryLabel = getCategoryLabel(categoryKey);
               const needsType = appealNeedsManualClassification(appeal);
+              const categoryLabel = getAppealCategoryDisplay(appeal).label;
               return (
                 <article
                   key={appeal.id}
+                  id={`appeal-${appeal.id}`}
                   className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/50"
                 >
                   <button
@@ -485,11 +533,11 @@ export function AppealsClient() {
                             контур · {appeal.mergedAppeals.length + 1}
                           </span>
                         ) : null}
-                        {appeal.pointName ? (
-                          <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-200">
-                            {appeal.pointName}
-                          </span>
-                        ) : null}
+                        <InlinePointPicker
+                          appeal={appeal}
+                          points={points}
+                          onSave={(pointId) => saveAppealPoint(appeal.id, pointId)}
+                        />
                       </div>
                       <div className="mt-1 truncate text-xs text-zinc-500">
                         {new Date(appeal.createdAt).toLocaleString("ru-RU")}
@@ -510,6 +558,9 @@ export function AppealsClient() {
                         appeal={appeal}
                         categoryKey={categoryKey}
                         needsManual={needsType}
+                        onChange={(category) =>
+                          setPendingCategories((current) => ({ ...current, [appeal.id]: category }))
+                        }
                         onSave={(category) => void saveClassification(appeal.id, category)}
                       />
                       <div className="mt-4 grid gap-4 lg:grid-cols-[1.3fr_0.9fr]">
@@ -549,6 +600,10 @@ export function AppealsClient() {
                           ) : null}
 
                           <MessageHistory appeal={appeal} />
+                          <OperatorChatReply
+                            appeal={appeal}
+                            onSend={(text) => sendOperatorReply(appeal.id, text)}
+                          />
                           <MergedContour appeals={appeal.mergedAppeals} />
 
                           {!mergeMode ? (
@@ -691,11 +746,13 @@ function AppealClassificationEditor({
   appeal,
   categoryKey,
   needsManual,
+  onChange,
   onSave,
 }: {
   appeal: Appeal;
   categoryKey: SupportCategory | "other";
   needsManual: boolean;
+  onChange?: (category: SupportCategory) => void;
   onSave: (category: SupportCategory) => void;
 }) {
   const [value, setValue] = useState<SupportCategory>(categoryKey === "other" ? "other" : categoryKey);
@@ -744,7 +801,11 @@ function AppealClassificationEditor({
           Категория
           <select
             value={value}
-            onChange={(event) => setValue(event.target.value as SupportCategory)}
+            onChange={(event) => {
+              const next = event.target.value as SupportCategory;
+              setValue(next);
+              onChange?.(next);
+            }}
             className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
           >
             {SUPPORT_CATEGORY_CATALOG.map((item) => (
@@ -1270,6 +1331,87 @@ function MergePanel({
   );
 }
 
+function messageDirectionLabel(direction: Appeal["messages"][number]["direction"]) {
+  switch (direction) {
+    case "in":
+      return "пользователь";
+    case "bot":
+      return "бот";
+    case "operator":
+      return "оператор";
+    case "ai":
+      return "ai";
+    case "system":
+      return "система";
+    default:
+      return direction;
+  }
+}
+
+function OperatorChatReply({
+  appeal,
+  onSend,
+}: {
+  appeal: Appeal;
+  onSend: (text: string) => Promise<void>;
+}) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const channel =
+    appeal.source === "telegram" || appeal.maxUserId?.startsWith("tg:")
+      ? "Telegram"
+      : appeal.source === "max"
+        ? "MAX"
+        : null;
+  const canReply = Boolean(appeal.maxChatId) && appeal.status !== "closed";
+
+  async function handleSend() {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      await onSend(trimmed);
+      setText("");
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : "Не удалось отправить");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (!canReply) return null;
+
+  return (
+    <div className="mt-3 rounded-lg border border-sky-500/25 bg-sky-500/5 p-3">
+      <div className="text-sm font-medium text-sky-100">Ответ в чат</div>
+      <p className="mt-1 text-xs text-sky-100/70">
+        Сообщение уйдёт в {channel ?? "мессенджер"} с привязкой: «Обращение №{appeal.appealNumber}: …»
+      </p>
+      <label className="mt-3 block text-xs text-zinc-500">
+        Текст для пользователя
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          rows={3}
+          placeholder="Например: скажите ваш номер телефона"
+          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500/50"
+        />
+      </label>
+      {error ? <p className="mt-2 text-xs text-rose-300">{error}</p> : null}
+      <button
+        type="button"
+        disabled={sending || !text.trim()}
+        onClick={() => void handleSend()}
+        className="mt-3 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-sky-400 disabled:opacity-40"
+      >
+        {sending ? "Отправляем…" : "Отправить в чат"}
+      </button>
+    </div>
+  );
+}
+
 function MessageHistory({ appeal }: { appeal: Appeal }) {
   if (appeal.messages.length === 0) return null;
   return (
@@ -1279,7 +1421,7 @@ function MessageHistory({ appeal }: { appeal: Appeal }) {
         {appeal.messages.map((message) => (
           <div key={message.id} className="text-xs text-zinc-400">
             <span className="text-zinc-500">
-              {new Date(message.createdAt).toLocaleString("ru-RU")} · {message.direction}
+              {new Date(message.createdAt).toLocaleString("ru-RU")} · {messageDirectionLabel(message.direction)}
             </span>
             <div className="mt-1 whitespace-pre-wrap text-zinc-300">{message.text}</div>
             {message.photoUrl ? (
@@ -1353,6 +1495,10 @@ function CourierCard({
   );
 }
 
+function formatPointLabel(point: DeliveryPoint): string {
+  return point.city ? `${point.name} · ${point.city}` : point.name;
+}
+
 function PointSelect({
   label,
   points,
@@ -1364,18 +1510,33 @@ function PointSelect({
   value: string;
   onChange: (value: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const filteredPoints = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return points;
+    return points.filter((point) => formatPointLabel(point).toLowerCase().includes(normalized));
+  }, [points, query]);
+
   return (
     <label className="block text-xs text-zinc-500">
       {label}
+      {points.length > 8 ? (
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Поиск точки…"
+          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+        />
+      ) : null}
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
       >
-        <option value="">Не выбрана</option>
-        {points.map((point) => (
+        <option value="">Не указана — выберите вручную</option>
+        {filteredPoints.map((point) => (
           <option key={point.id} value={point.id}>
-            {point.city ? `${point.name} · ${point.city}` : point.name}
+            {formatPointLabel(point)}
           </option>
         ))}
       </select>
@@ -1388,6 +1549,104 @@ function PointSelect({
         </span>
       ) : null}
     </label>
+  );
+}
+
+function InlinePointPicker({
+  appeal,
+  points,
+  onSave,
+}: {
+  appeal: Appeal;
+  points: DeliveryPoint[];
+  onSave: (pointId: string | null) => Promise<boolean> | boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [saving, setSaving] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  const filteredPoints = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return points;
+    return points.filter((point) => formatPointLabel(point).toLowerCase().includes(normalized));
+  }, [points, query]);
+
+  async function choose(pointId: string | null) {
+    setSaving(true);
+    try {
+      const ok = await onSave(pointId);
+      if (ok) setOpen(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div ref={rootRef} className="relative" onClick={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        disabled={saving || points.length === 0}
+        onClick={() => setOpen((current) => !current)}
+        className={
+          appeal.pointName
+            ? "rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-200 hover:border-sky-400/60"
+            : "rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200 hover:border-amber-400/60"
+        }
+        title="Указать или изменить точку вручную"
+      >
+        {saving ? "…" : appeal.pointName ?? "Указать точку"}
+      </button>
+
+      {open ? (
+        <div className="absolute left-0 top-full z-20 mt-1 w-72 rounded-lg border border-zinc-700 bg-zinc-950 p-2 shadow-xl">
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Поиск точки…"
+            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+          />
+          <div className="mt-2 max-h-56 overflow-y-auto">
+            <button
+              type="button"
+              onClick={() => void choose(null)}
+              className="block w-full rounded-md px-2 py-1.5 text-left text-xs text-zinc-400 hover:bg-zinc-900"
+            >
+              Без точки
+            </button>
+            {filteredPoints.map((point) => (
+              <button
+                key={point.id}
+                type="button"
+                onClick={() => void choose(point.id)}
+                className={
+                  appeal.pointId === point.id
+                    ? "block w-full rounded-md bg-sky-500/15 px-2 py-1.5 text-left text-xs text-sky-100"
+                    : "block w-full rounded-md px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-900"
+                }
+              >
+                {formatPointLabel(point)}
+              </button>
+            ))}
+            {filteredPoints.length === 0 ? (
+              <div className="px-2 py-2 text-xs text-zinc-500">Ничего не найдено</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1582,7 +1841,6 @@ function toAppealDraft(appeal: Appeal): AppealDraft {
   return {
     issueText: appeal.issueText,
     resultText: appeal.resultText ?? appeal.aiSuggestedReply ?? appeal.operatorReply ?? "",
-    operatorReply: appeal.operatorReply ?? appeal.aiSuggestedReply ?? "",
     pointId: appeal.pointId ?? "",
   };
 }

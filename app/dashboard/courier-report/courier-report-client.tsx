@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  APPEAL_INTAKE_SOURCES,
   APPEAL_RESOLUTION_METHODS,
   getAppealIntakeSource,
 } from "@/lib/appeal-intake-sources";
@@ -56,14 +57,23 @@ export function CourierReportClient() {
   const [editId, setEditId] = useState<string | null>(null);
 
   const [editForm, setEditForm] = useState({
+    issueText: "",
+    resultText: "",
+    intakeSourceCode: "",
     pointId: "",
+    senderName: "",
+    courierLastName: "",
+    phone: "",
     assignee: "",
     contractor: "",
     resolutionMethod: "",
     itComment: "",
     status: "open",
+    receivedAt: "",
     inProgressAt: "",
+    closedAt: "",
   });
+  const [pointQuery, setPointQuery] = useState("");
 
   const loadReport = useCallback(async () => {
     setLoading(true);
@@ -100,18 +110,42 @@ export function CourierReportClient() {
     return { total: rows.length, open, closed };
   }, [rows]);
 
+  function toggleEdit(row: AppealReportRow) {
+    if (editId === row.id) {
+      setEditId(null);
+      setPointQuery("");
+      return;
+    }
+    startEdit(row);
+  }
+
   function startEdit(row: AppealReportRow) {
     setEditId(row.id);
+    setPointQuery("");
     setEditForm({
-      pointId: points.find((point) => point.name === row.pointName)?.id ?? "",
+      issueText: row.issueText,
+      resultText: row.resultText ?? "",
+      intakeSourceCode: row.intakeSourceCode ?? "max_courier",
+      pointId: row.pointId ?? points.find((point) => point.name === row.pointName)?.id ?? "",
+      senderName: row.senderName ?? "",
+      courierLastName: row.courierLastName ?? "",
+      phone: row.phone ?? "",
       assignee: row.assignee ?? "",
       contractor: row.contractor ?? "",
       resolutionMethod: row.resolutionMethod ?? "",
       itComment: row.itComment ?? "",
       status: row.status,
+      receivedAt: row.receivedAt ? row.receivedAt.slice(0, 16) : "",
       inProgressAt: row.inProgressAt ? row.inProgressAt.slice(0, 16) : "",
+      closedAt: row.resolvedAt ? row.resolvedAt.slice(0, 16) : "",
     });
   }
+
+  const filteredPoints = useMemo(() => {
+    const normalized = pointQuery.trim().toLowerCase();
+    if (!normalized) return points;
+    return points.filter((point) => point.name.toLowerCase().includes(normalized));
+  }, [points, pointQuery]);
 
   async function saveEdit(row: AppealReportRow) {
     setSaving(true);
@@ -121,15 +155,23 @@ export function CourierReportClient() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          issueText: editForm.issueText,
+          resultText: editForm.resultText || null,
+          intakeSourceCode: editForm.intakeSourceCode || null,
           pointId: editForm.pointId || null,
+          senderName: editForm.senderName || null,
+          courierLastName: editForm.courierLastName || null,
+          phone: editForm.phone || null,
           assignee: editForm.assignee || null,
           contractor: editForm.contractor || null,
           resolutionMethod: editForm.resolutionMethod || null,
           itComment: editForm.itComment || null,
           status: editForm.status,
-          resultText:
-            editForm.status === "closed"
-              ? editForm.itComment || "Закрыто из отчёта курьерского приложения"
+          createdAt: editForm.receivedAt ? new Date(editForm.receivedAt).toISOString() : undefined,
+          inProgressAt: editForm.inProgressAt ? new Date(editForm.inProgressAt).toISOString() : null,
+          closedAt:
+            editForm.status === "closed" && editForm.closedAt
+              ? new Date(editForm.closedAt).toISOString()
               : undefined,
         }),
       });
@@ -139,6 +181,7 @@ export function CourierReportClient() {
         return;
       }
       setEditId(null);
+      setPointQuery("");
       await loadReport();
     } finally {
       setSaving(false);
@@ -218,7 +261,6 @@ export function CourierReportClient() {
                   <th className="px-3 py-3">Решение</th>
                   <th className="px-3 py-3">Общее</th>
                   <th className="px-3 py-3 min-w-[160px]">Комментарий</th>
-                  <th className="px-3 py-3" />
                 </tr>
               </thead>
               <tbody>
@@ -227,9 +269,17 @@ export function CourierReportClient() {
                   const resolution = APPEAL_RESOLUTION_METHODS.find(
                     (item) => item.code === row.resolutionMethod,
                   );
+                  const expanded = editId === row.id;
                   return (
                     <Fragment key={row.id}>
-                      <tr className="border-b border-zinc-900 align-top hover:bg-zinc-900/40">
+                      <tr
+                        onClick={() => toggleEdit(row)}
+                        className={
+                          expanded
+                            ? "cursor-pointer border-b border-zinc-900 bg-sky-500/10 align-top"
+                            : "cursor-pointer border-b border-zinc-900 align-top hover:bg-zinc-900/40"
+                        }
+                      >
                         <td className="px-3 py-3 whitespace-nowrap text-zinc-300">
                           {formatDate(row.receivedAt)}
                         </td>
@@ -286,36 +336,102 @@ export function CourierReportClient() {
                           {row.totalTimeLabel}
                         </td>
                         <td className="px-3 py-3 text-zinc-400">{row.itComment ?? "—"}</td>
-                        <td className="px-3 py-3">
-                          <button
-                            type="button"
-                            onClick={() => startEdit(row)}
-                            className="text-xs text-sky-400 hover:text-sky-300"
-                          >
-                            Изменить
-                          </button>
-                        </td>
                       </tr>
-                      {editId === row.id ? (
+                      {expanded ? (
                         <tr key={`${row.id}-edit`} className="border-b border-zinc-900 bg-zinc-900/60">
-                          <td colSpan={16} className="px-4 py-4">
-                            <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
+                          <td colSpan={15} className="px-4 py-4" onClick={(event) => event.stopPropagation()}>
+                            <div className="mb-3 flex items-center justify-between gap-2">
+                              <div className="text-sm font-medium text-white">
+                                Обращение №{row.appealNumber} · MAX
+                              </div>
+                              <span className="text-xs text-zinc-500">Нажмите на строку, чтобы свернуть</span>
+                            </div>
+                            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                              <label className="text-xs text-zinc-500 lg:col-span-2">
+                                Инцидент / описание
+                                <textarea
+                                  value={editForm.issueText}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, issueText: e.target.value }))
+                                  }
+                                  rows={4}
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
+                                />
+                              </label>
                               <label className="text-xs text-zinc-500">
                                 Точка
+                                <input
+                                  value={pointQuery}
+                                  onChange={(e) => setPointQuery(e.target.value)}
+                                  placeholder="Поиск точки…"
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
+                                />
                                 <select
                                   value={editForm.pointId}
                                   onChange={(e) =>
                                     setEditForm((prev) => ({ ...prev, pointId: e.target.value }))
                                   }
-                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
                                 >
-                                  <option value="">—</option>
-                                  {points.map((point) => (
+                                  <option value="">— не указана —</option>
+                                  {filteredPoints.map((point) => (
                                     <option key={point.id} value={point.id}>
                                       {point.name}
                                     </option>
                                   ))}
                                 </select>
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Источник
+                                <select
+                                  value={editForm.intakeSourceCode}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({
+                                      ...prev,
+                                      intakeSourceCode: e.target.value,
+                                    }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                >
+                                  {APPEAL_INTAKE_SOURCES.map((item) => (
+                                    <option key={item.code} value={item.code}>
+                                      {item.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Имя курьера
+                                <input
+                                  value={editForm.senderName}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, senderName: e.target.value }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Фамилия
+                                <input
+                                  value={editForm.courierLastName}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({
+                                      ...prev,
+                                      courierLastName: e.target.value,
+                                    }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Телефон
+                                <input
+                                  value={editForm.phone}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, phone: e.target.value }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                />
                               </label>
                               <label className="text-xs text-zinc-500">
                                 Статус
@@ -329,6 +445,10 @@ export function CourierReportClient() {
                                         e.target.value === "in_progress" && !prev.inProgressAt
                                           ? new Date().toISOString().slice(0, 16)
                                           : prev.inProgressAt,
+                                      closedAt:
+                                        e.target.value === "closed" && !prev.closedAt
+                                          ? new Date().toISOString().slice(0, 16)
+                                          : prev.closedAt,
                                     }))
                                   }
                                   className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
@@ -337,6 +457,43 @@ export function CourierReportClient() {
                                   <option value="in_progress">В работе</option>
                                   <option value="closed">Закрыто</option>
                                 </select>
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Поступило
+                                <input
+                                  type="datetime-local"
+                                  value={editForm.receivedAt}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, receivedAt: e.target.value }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Взято в работу
+                                <input
+                                  type="datetime-local"
+                                  value={editForm.inProgressAt}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({
+                                      ...prev,
+                                      inProgressAt: e.target.value,
+                                    }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-zinc-500">
+                                Решено
+                                <input
+                                  type="datetime-local"
+                                  value={editForm.closedAt}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, closedAt: e.target.value }))
+                                  }
+                                  disabled={editForm.status !== "closed"}
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm disabled:opacity-50"
+                                />
                               </label>
                               <label className="text-xs text-zinc-500">
                                 Способ решения
@@ -369,22 +526,34 @@ export function CourierReportClient() {
                                 />
                               </label>
                               <label className="text-xs text-zinc-500">
-                                Взято в работу
+                                Подрядчик
                                 <input
-                                  type="datetime-local"
-                                  value={editForm.inProgressAt}
-                                  readOnly
-                                  title="Время проставляется автоматически при переводе в «В работе»"
-                                  className="mt-1 w-full cursor-default rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-sm text-zinc-400"
+                                  value={editForm.contractor}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, contractor: e.target.value }))
+                                  }
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
                                 />
                               </label>
-                              <label className="text-xs text-zinc-500 md:col-span-2">
+                              <label className="text-xs text-zinc-500 lg:col-span-2">
+                                Решение
+                                <textarea
+                                  value={editForm.resultText}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({ ...prev, resultText: e.target.value }))
+                                  }
+                                  rows={2}
+                                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-zinc-500 lg:col-span-3">
                                 Комментарий
-                                <input
+                                <textarea
                                   value={editForm.itComment}
                                   onChange={(e) =>
                                     setEditForm((prev) => ({ ...prev, itComment: e.target.value }))
                                   }
+                                  rows={2}
                                   className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm"
                                 />
                               </label>
@@ -394,16 +563,19 @@ export function CourierReportClient() {
                                 type="button"
                                 disabled={saving}
                                 onClick={() => void saveEdit(row)}
-                                className="rounded bg-sky-600 px-3 py-1.5 text-sm text-white hover:bg-sky-500"
+                                className="rounded bg-sky-600 px-3 py-1.5 text-sm text-white hover:bg-sky-500 disabled:opacity-60"
                               >
-                                Сохранить
+                                {saving ? "Сохраняем…" : "Сохранить"}
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setEditId(null)}
+                                onClick={() => {
+                                  setEditId(null);
+                                  setPointQuery("");
+                                }}
                                 className="rounded border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300"
                               >
-                                Отмена
+                                Закрыть
                               </button>
                             </div>
                           </td>

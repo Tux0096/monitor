@@ -14,7 +14,7 @@ type PushConfig =
       vapidKey: string;
     };
 
-type PushState = "unsupported" | "disabled" | "prompt" | "pending" | "enabled" | "denied";
+type PushState = "unsupported" | "disabled" | "prompt" | "pending" | "checking" | "enabled" | "denied" | "error";
 
 function detectPlatform() {
   if (typeof navigator === "undefined") return "web";
@@ -70,6 +70,7 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
       });
 
       if (!token) {
+        setState("error");
         setMessage("Не удалось получить FCM-токен.");
         return;
       }
@@ -80,6 +81,7 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
         body: JSON.stringify({ token, platform: detectPlatform() }),
       });
       if (!subscribeRes.ok) {
+        setState("error");
         setMessage("Не удалось сохранить подписку на сервере.");
         return;
       }
@@ -95,6 +97,7 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
       setState("enabled");
       setMessage("Push включён. Добавьте сайт на экран «Домой» для уведомлений в фоне.");
     } catch (error) {
+      setState("error");
       setMessage(error instanceof Error ? error.message : "Ошибка настройки push");
     }
   }, []);
@@ -110,7 +113,9 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
       return;
     }
     if (Notification.permission === "granted") {
-      setState("enabled");
+      // Permission alone doesn't mean the FCM subscription is actually valid
+      // (e.g. it can fail silently server-side) — verify by re-subscribing.
+      setState("checking");
       return;
     }
     setState("prompt");
@@ -132,6 +137,27 @@ export function PushNotificationSetup({ compact = false }: { compact?: boolean }
       <div className={compact ? "text-xs text-emerald-300" : "rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200"}>
         Push-уведомления включены
         {message ? <div className="mt-1 text-xs text-emerald-300/80">{message}</div> : null}
+      </div>
+    );
+  }
+
+  if (state === "checking") {
+    return compact ? null : (
+      <p className="text-xs text-zinc-500">Проверка push-подписки…</p>
+    );
+  }
+
+  if (state === "error") {
+    return (
+      <div className={compact ? "text-xs text-rose-300" : "rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200"}>
+        Push не работает{message ? `: ${message}` : ""}
+        <button
+          type="button"
+          onClick={() => void enablePush()}
+          className="ml-2 underline underline-offset-2 hover:text-rose-100"
+        >
+          Повторить
+        </button>
       </div>
     );
   }

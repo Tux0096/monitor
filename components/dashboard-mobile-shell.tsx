@@ -14,6 +14,7 @@ type NavItem = {
 const primaryNav: NavItem[] = [
   { href: "/dashboard", label: "Аналитика", shortLabel: "Аналитика" },
   { href: "/dashboard/appeals", label: "Обращения", shortLabel: "Обращения" },
+  { href: "/dashboard/statistics", label: "Статистика", shortLabel: "Стат." },
   { href: "/dashboard/appeals-report", label: "Отчёт IT", shortLabel: "IT" },
   { href: "/dashboard/courier-report", label: "Отчёт курьерское приложение", shortLabel: "Курьеры" },
 ];
@@ -110,7 +111,7 @@ export function DashboardMobileShell({
       </div>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur md:hidden safe-bottom">
-        <div className="mx-auto grid max-w-lg grid-cols-4 gap-1 px-2 py-2">
+        <div className="mx-auto grid max-w-lg grid-cols-5 gap-1 px-1 py-2">
           {primaryNav.map((item) => (
             <Link
               key={item.href}

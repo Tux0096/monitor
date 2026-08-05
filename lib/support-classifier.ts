@@ -300,6 +300,7 @@ export function shouldRegisterSupportAppeal(text: string, hasPhoto: boolean): bo
 }
 
 export const SUPPORT_RESOLUTION_PRESETS = [
+  "данные обновлены",
   "Проблема решена, можно продолжать работу.",
   "Отправлена инструкция по устранению.",
   "Требуется обновление приложения — проверьте магазин приложений.",
@@ -307,6 +308,14 @@ export const SUPPORT_RESOLUTION_PRESETS = [
   "Не воспроизводится — обратитесь снова при повторении.",
   "Обращение закрыто без ответа курьеру.",
 ] as const;
+
+/** Если закрыли обновлением данных — тип «Неактуальные данные курьеров». */
+export function inferCategoryFromResolution(resultText: string): SupportCategory | null {
+  const normalized = resultText.trim().toLowerCase();
+  if (!normalized) return null;
+  if (/данн/.test(normalized) && /обнов/.test(normalized)) return "stale_courier_data";
+  return null;
+}
 
 export function normalizeSupportText(text: string): string {
   return text
@@ -324,6 +333,24 @@ export function getCategoryLabel(key: string | null | undefined): string {
   const legacy = Object.entries(legacyCategoryMap).find(([label]) => label === key.toLowerCase());
   if (legacy) return getCategoryLabel(legacy[1]);
   return key;
+}
+
+/** Тип обращения для UI и статистики — из поля category заявки. */
+export function getAppealCategoryDisplay(appeal: {
+  classification: string | null;
+  category: string | null;
+  confidence: number | null;
+  classificationSource?: ClassificationSource | null;
+}): { key: string; label: string } {
+  if (appealNeedsManualClassification(appeal)) {
+    return { key: "needs_manual", label: "Уточнить тип" };
+  }
+  const storedLabel = appeal.category?.trim();
+  if (storedLabel) {
+    return { key: storedLabel.toLowerCase(), label: storedLabel };
+  }
+  const key = resolveAppealCategoryKey(appeal);
+  return { key, label: getCategoryLabel(key) };
 }
 
 export function resolveAppealCategoryKey(appeal: {

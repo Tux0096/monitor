@@ -20,6 +20,11 @@ export async function PATCH(
     pointId?: string | null;
     intakeSourceCode?: string | null;
     inProgressAt?: string | null;
+    closedAt?: string | null;
+    createdAt?: string | null;
+    senderName?: string | null;
+    courierLastName?: string | null;
+    phone?: string | null;
     resolutionMethod?: "remote" | "onsite" | null;
     assignee?: string | null;
     contractor?: string | null;

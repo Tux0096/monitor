@@ -1,4 +1,4 @@
-import { normalizeDeliveryPointName } from "@/lib/delivery-points-catalog";
+import { isCourierExcludedPointName, normalizeDeliveryPointName } from "@/lib/delivery-points-catalog";
 import type { DeliveryPoint } from "@/lib/points";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 
@@ -20,8 +20,9 @@ const CACHE_MS = 5 * 60 * 1000;
 const POINT_ALIAS_RULES: PointAliasRule[] = [
   rule(["лукачи", "лукач", "лукачева"], "лукачева"),
   rule(["люликова", "димитр 110", "димитрова 110"], "димитр. 110"),
-  rule(["димитр 131"], "димитр 131"),
+  rule(["димитр 131", "димитрова 13", "димитрова131"], "димитр 131"),
   rule(["скворцов 131"], "димитр 131"),
+  rule(["юг 2", "юг-2", "юг2"], "молодогв"),
   rule(["революц", "революционная", "скворцов 70"], "революц. 70"),
   rule(["лазо", "крохмалев", "сергей лазо"], "лазо 24"),
   rule(["новокуйб", "новокуйбышевск", "ковалкин"], "новокуйб"),
@@ -244,38 +245,51 @@ function parseAiPointResponse(
 export async function resolveDeliveryPointFromText(
   text: string,
   profilePointId?: string | null,
+  options?: { allowAi?: boolean; forCourier?: boolean },
 ): Promise<ResolvedDeliveryPoint | null> {
+  const forCourier = options?.forCourier ?? false;
+
+  function accept(resolved: ResolvedDeliveryPoint | null): ResolvedDeliveryPoint | null {
+    if (!resolved) return null;
+    if (forCourier && isCourierExcludedPointName(resolved.name)) return null;
+    return resolved;
+  }
+
   const trimmed = text.trim();
   if (!trimmed) {
     if (!profilePointId) return null;
     const points = await loadPoints();
     const profilePoint = points.find((point) => point.id === profilePointId);
-    return profilePoint
-      ? { id: profilePoint.id, name: profilePoint.name, confidence: 0.5, source: "profile" }
-      : null;
+    return accept(
+      profilePoint
+        ? { id: profilePoint.id, name: profilePoint.name, confidence: 0.5, source: "profile" }
+        : null,
+    );
   }
 
   const points = await loadPoints();
   if (points.length === 0) return null;
 
-  const aliasMatch = resolveByAliases(trimmed, points);
+  const aliasMatch = accept(resolveByAliases(trimmed, points));
   if (aliasMatch) return aliasMatch;
 
-  const tokenMatch = resolveByTokens(trimmed, points);
+  const tokenMatch = accept(resolveByTokens(trimmed, points));
   if (tokenMatch) return tokenMatch;
 
-  const aiMatch = await resolveByAi(trimmed, points);
-  if (aiMatch) return aiMatch;
+  if (options?.allowAi !== false) {
+    const aiMatch = accept(await resolveByAi(trimmed, points));
+    if (aiMatch) return aiMatch;
+  }
 
   if (profilePointId) {
     const profilePoint = points.find((point) => point.id === profilePointId);
     if (profilePoint) {
-      return {
+      return accept({
         id: profilePoint.id,
         name: profilePoint.name,
         confidence: 0.5,
         source: "profile",
-      };
+      });
     }
   }
 

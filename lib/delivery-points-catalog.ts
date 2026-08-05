@@ -57,6 +57,21 @@ export const DELIVERY_POINTS_CATALOG: DeliveryPointCatalogItem[] = [
   city: inferCity(name),
 }));
 
+/** Офисные точки — не для курьерских обращений и графиков по точкам. */
+export const COURIER_EXCLUDED_POINT_NAMES = [
+  "Колл центр",
+  "Центральный офис",
+  "Бухгалтерия",
+] as const;
+
+export function isCourierExcludedPointName(name: string | null | undefined): boolean {
+  if (!name?.trim()) return false;
+  const normalized = normalizeDeliveryPointName(name);
+  return COURIER_EXCLUDED_POINT_NAMES.some(
+    (item) => normalizeDeliveryPointName(item) === normalized,
+  );
+}
+
 export function normalizeDeliveryPointName(name: string): string {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
 }

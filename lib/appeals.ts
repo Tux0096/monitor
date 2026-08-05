@@ -1,4 +1,9 @@
 import { resolveDeliveryPointFromText } from "@/lib/delivery-point-resolver";
+import { isCourierExcludedPointName } from "@/lib/delivery-points-catalog";
+import { getDeliveryPoint } from "@/lib/points";
+
+/** Календарные даты отчётов и статистики — как в списке обращений (ru-RU). */
+const APP_TIMEZONE = "Europe/Samara";
 import { seedDeliveryPointsCatalog } from "@/lib/delivery-points-seed";
 import postgres from "postgres";
 import { persistAppealPhotoUrl } from "@/lib/appeal-uploads";
@@ -20,6 +25,7 @@ import {
 import { sendMaxMessage, type MaxInlineKeyboard } from "@/lib/max-bot";
 import { getTelegramForumTopicName, sendTelegramMessage } from "@/lib/telegram-bot";
 import { notifyNewAppealPush } from "@/lib/push-notifications";
+import { triageAppealForJira } from "@/lib/bug-tickets";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { suggestSupportReply } from "@/lib/support-ai";
 import {
@@ -33,8 +39,12 @@ import {
 import {
   buildClassificationFromCategory,
   classifySupportText,
+  getAppealCategoryDisplay,
+  getCategoryLabel,
+  inferCategoryFromResolution,
   normalizeSupportText,
   shouldRegisterSupportAppeal,
+  SUPPORT_CATEGORY_CATALOG,
   type SupportCategory,
   type SupportClassification,
   type SupportPriority,
@@ -86,6 +96,7 @@ export type Appeal = {
   status: AppealStatus;
   maxChatId: string | null;
   maxUserId: string | null;
+  telegramThreadId: string | null;
   senderName: string | null;
   courierLastName: string | null;
   phone: string | null;
@@ -132,8 +143,14 @@ export type AppealReportRow = {
   appealNumber: number;
   status: AppealStatus;
   date: string;
+  pointId: string | null;
   pointName: string | null;
   incident: string;
+  issueText: string;
+  resultText: string | null;
+  senderName: string | null;
+  courierLastName: string | null;
+  phone: string | null;
   intakeSourceCode: string | null;
   intakeSourceLabel: string;
   initiator: string;
@@ -183,6 +200,58 @@ export type AppealsAnalyticsReport = {
   categoryRows: AppealsTableMetric[];
   userRows: AppealsTableMetric[];
   qualityRows: AppealsTableMetric[];
+};
+
+export type AppealsStatisticsChannel = "it" | "courier";
+
+export type AppealsStatisticsSummary = {
+  total: number;
+  open: number;
+  inProgress: number;
+  closed: number;
+  avgResponseMinutes: number | null;
+  avgResolveMinutes: number | null;
+  avgTotalMinutes: number | null;
+};
+
+export type AppealsStatisticsTimelineRow = {
+  date: string;
+  label: string;
+  total: number;
+  open: number;
+  inProgress: number;
+  closed: number;
+};
+
+export type AppealsStatisticsBreakdownRow = {
+  key: string;
+  label: string;
+  total: number;
+  open: number;
+  inProgress: number;
+  closed: number;
+};
+
+export type AppealsStatisticsAppealRow = {
+  id: string;
+  appealNumber: number;
+  categoryKey: string;
+  initiator: string;
+  status: AppealStatus;
+  createdAt: string;
+  pointName: string | null;
+};
+
+export type AppealsStatistics = {
+  channel: AppealsStatisticsChannel;
+  from: string;
+  to: string;
+  summary: AppealsStatisticsSummary;
+  timeline: AppealsStatisticsTimelineRow[];
+  byPoint: AppealsStatisticsBreakdownRow[];
+  byInitiator: AppealsStatisticsBreakdownRow[];
+  byCategory: AppealsStatisticsBreakdownRow[];
+  appeals: AppealsStatisticsAppealRow[];
 };
 
 export type SupportMessageInput = {
@@ -362,6 +431,7 @@ async function migrateAppealsSchema() {
     ["assignee", "text"],
     ["contractor", "text"],
     ["it_comment", "text"],
+    ["telegram_thread_id", "text"],
   ]);
   await addColumns("employees", [
     ["display_name", "text"],
@@ -625,6 +695,11 @@ export async function updateAppealByOperator(
     status?: AppealStatus;
     intakeSourceCode?: string | null;
     inProgressAt?: string | null;
+    closedAt?: string | null;
+    createdAt?: string | null;
+    senderName?: string | null;
+    courierLastName?: string | null;
+    phone?: string | null;
     resolutionMethod?: AppealResolutionMethod | null;
     assignee?: string | null;
     contractor?: string | null;
@@ -657,12 +732,23 @@ export async function updateAppealByOperator(
   let descriptionNormalized = normalizeSupportText(nextIssueText);
 
   if (issueText && issueText !== appeal.issueText) {
-    const next = classifySupportText(issueText);
-    classification = next.category;
-    category = next.categoryLabel;
-    subcategory = next.subcategory;
-    priority = next.priority;
-    confidence = next.confidence;
+    if (appeal.classificationSource === "operator") {
+      const fromCategoryLine = readClassificationFromIssueCategoryLine(issueText);
+      if (fromCategoryLine) {
+        classification = fromCategoryLine.category;
+        category = fromCategoryLine.categoryLabel;
+        subcategory = fromCategoryLine.subcategory;
+        priority = fromCategoryLine.priority;
+        confidence = fromCategoryLine.confidence;
+      }
+    } else {
+      const next = classifySupportText(issueText);
+      classification = next.category;
+      category = next.categoryLabel;
+      subcategory = next.subcategory;
+      priority = next.priority;
+      confidence = next.confidence;
+    }
     descriptionNormalized = normalizeSupportText(issueText);
   }
 
@@ -671,6 +757,12 @@ export async function updateAppealByOperator(
   const nextOperatorReply =
     operatorReply !== undefined ? operatorReply || null : appeal.operatorReply;
   const nextPointId = input.pointId !== undefined ? input.pointId : appeal.pointId;
+  if (nextPointId && appeal.source === "max") {
+    const point = await getDeliveryPoint(nextPointId);
+    if (point && isCourierExcludedPointName(point.name)) {
+      throw new Error("Колл центр и офисные точки недоступны для курьерских обращений");
+    }
+  }
   const nextIntakeSourceCode =
     input.intakeSourceCode !== undefined ? input.intakeSourceCode : appeal.intakeSourceCode;
   const nextResolutionMethod =
@@ -691,6 +783,27 @@ export async function updateAppealByOperator(
     nextInProgressAt = input.inProgressAt || null;
   }
 
+  const nextSenderName =
+    input.senderName !== undefined ? input.senderName || null : appeal.senderName;
+  const nextCourierLastName =
+    input.courierLastName !== undefined ? input.courierLastName || null : appeal.courierLastName;
+  const nextPhone = input.phone !== undefined ? input.phone || null : appeal.phone;
+  const nextCreatedAt =
+    input.createdAt !== undefined && input.createdAt
+      ? input.createdAt
+      : appeal.createdAt;
+
+  let nextClosedAt = appeal.closedAt;
+  if (nextStatus === "closed") {
+    if (input.closedAt !== undefined && input.closedAt) {
+      nextClosedAt = input.closedAt;
+    } else if (!appeal.closedAt) {
+      nextClosedAt = new Date().toISOString();
+    }
+  } else {
+    nextClosedAt = null;
+  }
+
   await sql()`
     UPDATE support_appeals
     SET issue_text = ${nextIssueText},
@@ -703,6 +816,10 @@ export async function updateAppealByOperator(
         assignee = ${nextAssignee},
         contractor = ${nextContractor},
         it_comment = ${nextItComment},
+        sender_name = ${nextSenderName},
+        courier_last_name = ${nextCourierLastName},
+        phone = ${nextPhone},
+        created_at = ${new Date(nextCreatedAt)},
         status = ${nextStatus},
         classification = ${classification},
         category = ${category},
@@ -714,11 +831,7 @@ export async function updateAppealByOperator(
           WHEN ${Boolean(issueText && issueText !== appeal.issueText)} THEN 'operator'
           ELSE classification_source
         END,
-        closed_at = CASE
-          WHEN ${close} THEN now()
-          WHEN ${nextStatus} IN ('open', 'in_progress') THEN NULL
-          ELSE closed_at
-        END,
+        closed_at = ${nextClosedAt ? new Date(nextClosedAt) : null},
         updated_at = now()
     WHERE id = ${id}
   `;
@@ -811,7 +924,9 @@ async function notifyCourierAppealsMerged(primary: Appeal, secondaries: Appeal[]
 
   if (primary.maxUserId?.startsWith("tg:") && primary.maxChatId) {
     try {
-      await sendTelegramMessage(primary.maxChatId, text);
+      await sendTelegramMessage(primary.maxChatId, text, {
+        messageThreadId: resolveTelegramThreadForAppeal(primary),
+      });
     } catch {
       // уведомление не должно блокировать объединение
     }
@@ -911,6 +1026,22 @@ export async function mergeAppealsInto(
   await notifyCourierAppealsMerged(primary, mergedSecondaries);
 
   return getAppeal(primaryId);
+}
+
+function readClassificationFromIssueCategoryLine(issueText: string): SupportClassification | null {
+  const categoryLine = issueText
+    .split("\n")
+    .find((line) => line.startsWith("Категория:"))
+    ?.replace(/^Категория:\s*/, "")
+    .trim();
+  if (!categoryLine) return null;
+
+  for (const item of SUPPORT_CATEGORY_CATALOG) {
+    if (item.label.toLowerCase() === categoryLine.toLowerCase()) {
+      return buildClassificationFromCategory(item.key);
+    }
+  }
+  return null;
 }
 
 function patchIssueTextCategory(issueText: string, classification: SupportClassification) {
@@ -1496,6 +1627,15 @@ export async function createCourierAppealFromMiniApp(input: {
     });
   }
 
+  void triageAppealForJira({
+    appealNumber,
+    description,
+    category: classification.category,
+    categoryLabel: classification.categoryLabel,
+    priority: classification.priority,
+    pointId: appealPointId ?? null,
+  });
+
   return {
     action: "created" as const,
     appealNumber,
@@ -1570,7 +1710,7 @@ export async function listAppeals(status?: string, source?: string): Promise<App
   await attachMessages(appeals);
   await attachMergedAppeals(appeals);
   attachUnreadCounts(appeals, "operator");
-  return appeals;
+  return filterAdminInitiatorAppeals(appeals, await loadAdminEmployeeRows());
 }
 
 function extractIncidentText(issueText: string): string {
@@ -1601,8 +1741,14 @@ function toAppealReportRow(appeal: Appeal): AppealReportRow {
     appealNumber: appeal.appealNumber,
     status: appeal.status,
     date: receivedAt.slice(0, 10),
+    pointId: appeal.pointId,
     pointName: appeal.pointName,
     incident: extractIncidentText(appeal.issueText),
+    issueText: appeal.issueText,
+    resultText: appeal.resultText,
+    senderName: appeal.senderName,
+    courierLastName: appeal.courierLastName,
+    phone: appeal.phone,
     intakeSourceCode: appeal.intakeSourceCode,
     intakeSourceLabel: getAppealIntakeSourceLabel(
       appeal.intakeSourceCode ??
@@ -1658,13 +1804,8 @@ export async function listAppealsReport(range?: {
   `;
 
   const appeals = rows.map((row) => toAppeal(row));
-  let filtered = appeals;
-  if (channel === "it") {
-    const adminRows = await loadAdminEmployeeRows();
-    filtered = appeals.filter((appeal) => !appealInitiatorIsAdmin(appeal, adminRows));
-  }
-
-  return filtered.map((appeal) => toAppealReportRow(appeal));
+  const adminRows = await loadAdminEmployeeRows();
+  return filterAdminInitiatorAppeals(appeals, adminRows).map((appeal) => toAppealReportRow(appeal));
 }
 
 export async function createManualAppeal(input: {
@@ -1853,8 +1994,17 @@ async function attachMessages(appeals: Appeal[]) {
   }
 }
 
-export async function closeAppeal(id: string, resultText: string) {
+export async function closeAppeal(
+  id: string,
+  resultText: string,
+  category?: SupportCategory,
+) {
   await ensureAppealsSchema();
+  const inferred = category ?? inferCategoryFromResolution(resultText) ?? undefined;
+  if (inferred) {
+    await updateAppealClassification(id, inferred);
+  }
+
   const before = await getAppeal(id);
   const rows = await sql()`
     UPDATE support_appeals
@@ -1872,14 +2022,53 @@ export async function closeAppeal(id: string, resultText: string) {
   return appeal;
 }
 
+export function formatOperatorChatMessage(appealNumber: number, text: string): string {
+  return `Обращение №${appealNumber}: ${text}`;
+}
+
+function resolveTelegramThreadForAppeal(appeal: Pick<Appeal, "maxChatId" | "telegramThreadId">): string | null {
+  if (appeal.telegramThreadId) return appeal.telegramThreadId;
+  if (!appeal.maxChatId) return null;
+  const allowlist = parseTelegramItTopicAllowlist();
+  const match = allowlist.find(
+    (entry) => entry.chatId == null || entry.chatId === appeal.maxChatId,
+  );
+  return match?.threadId ?? null;
+}
+
+export async function sendOperatorReplyToAppealChat(
+  id: string,
+  text: string,
+): Promise<Appeal | null> {
+  await ensureAppealsSchema();
+  const appeal = await getAppeal(id);
+  if (!appeal) return null;
+  if (!appeal.maxChatId) {
+    throw new Error("У обращения нет chat_id для ответа в мессенджер");
+  }
+
+  const message = formatOperatorChatMessage(appeal.appealNumber, text);
+  const isTelegram = appeal.source === "telegram" || appeal.maxUserId?.startsWith("tg:");
+
+  if (isTelegram) {
+    await sendTelegramMessage(appeal.maxChatId, message, {
+      messageThreadId: resolveTelegramThreadForAppeal(appeal),
+    });
+  } else {
+    await sendMaxMessage(appeal.maxChatId, message);
+  }
+
+  await addOperatorReply(id, text);
+  return getAppeal(id);
+}
+
 export async function addOperatorReply(id: string, text: string) {
   await ensureAppealsSchema();
   const appeal = await getAppeal(id);
   if (!appeal) return null;
   await appendMessage({
     appealId: id,
-    conversationKey:
-      appeal.maxChatId && appeal.maxUserId ? `${appeal.maxChatId}:${appeal.maxUserId}` : null,
+    conversationKey: appealConversationKey(appeal),
     direction: "operator",
     maxChatId: appeal.maxChatId,
     maxUserId: appeal.maxUserId,
@@ -2117,6 +2306,198 @@ export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange):
   };
 }
 
+export async function readAppealsStatistics(input: {
+  from?: string | null;
+  to?: string | null;
+  channel: AppealsStatisticsChannel;
+}): Promise<AppealsStatistics> {
+  await ensureAppealsSchema();
+  const { from, to } = resolveAnalyticsDateRange({ from: input.from, to: input.to });
+  const channel = input.channel;
+
+  const rows = await sql()`
+    SELECT a.*, ap.name AS appeal_point_name
+    FROM support_appeals a
+    LEFT JOIN delivery_points ap ON ap.id = a.point_id
+    WHERE a.merged_into_id IS NULL
+      AND (
+        (${channel} = 'it' AND a.source <> 'max')
+        OR (${channel} = 'courier' AND a.source = 'max')
+      )
+      AND (a.created_at AT TIME ZONE ${APP_TIMEZONE})::date >= ${from}::date
+      AND (a.created_at AT TIME ZONE ${APP_TIMEZONE})::date <= ${to}::date
+    ORDER BY a.created_at ASC
+  `;
+
+  let appeals = rows.map((row) => toAppeal(row));
+  appeals = filterAdminInitiatorAppeals(appeals, await loadAdminEmployeeRows());
+  appeals = appeals.map((appeal) => sanitizeCourierAppealPoint(appeal));
+
+  const summary = buildAppealsStatisticsSummary(appeals);
+  const timeline = fillAppealsStatisticsTimeline(
+    buildAppealsStatisticsTimeline(appeals),
+    from,
+    to,
+  );
+  const byPoint = buildAppealsStatisticsBreakdown(appeals, (appeal) => ({
+    key: appeal.pointId ?? "none",
+    label: appeal.pointName ?? "Без точки",
+  }));
+  const byInitiator = buildAppealsStatisticsBreakdown(appeals, (appeal) => {
+    const label = formatReportInitiator(appeal);
+    const key = appeal.maxUserId ?? appeal.phone ?? label;
+    return { key, label };
+  });
+  const byCategory = buildAppealsStatisticsBreakdown(appeals, getAppealCategoryDisplay, 20);
+
+  const appealRows: AppealsStatisticsAppealRow[] = appeals.map((appeal) => ({
+    id: appeal.id,
+    appealNumber: appeal.appealNumber,
+    categoryKey: getAppealCategoryDisplay(appeal).key,
+    initiator: formatReportInitiator(appeal),
+    status: appeal.status,
+    createdAt: appeal.createdAt,
+    pointName: appeal.pointName ?? null,
+  }));
+
+  return {
+    channel,
+    from,
+    to,
+    summary,
+    timeline,
+    byPoint,
+    byInitiator,
+    byCategory,
+    appeals: appealRows,
+  };
+}
+
+function buildAppealsStatisticsSummary(appeals: Appeal[]): AppealsStatisticsSummary {
+  const open = appeals.filter((appeal) => appeal.status === "open").length;
+  const inProgress = appeals.filter((appeal) => appeal.status === "in_progress").length;
+  const closed = appeals.filter((appeal) => appeal.status === "closed").length;
+
+  const responseMinutes = appeals
+    .map((appeal) => durationSeconds(appeal.createdAt, appeal.inProgressAt))
+    .filter((value): value is number => value != null);
+  const resolveMinutes = appeals
+    .map((appeal) => durationSeconds(appeal.inProgressAt, appeal.closedAt))
+    .filter((value): value is number => value != null);
+  const totalMinutes = appeals
+    .map((appeal) => durationSeconds(appeal.createdAt, appeal.closedAt))
+    .filter((value): value is number => value != null);
+
+  const average = (values: number[]) =>
+    values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length / 60 : null;
+
+  return {
+    total: appeals.length,
+    open,
+    inProgress,
+    closed,
+    avgResponseMinutes: average(responseMinutes),
+    avgResolveMinutes: average(resolveMinutes),
+    avgTotalMinutes: average(totalMinutes),
+  };
+}
+
+function buildAppealsStatisticsTimeline(appeals: Appeal[]): AppealsStatisticsTimelineRow[] {
+  const map = new Map<string, AppealsStatisticsTimelineRow>();
+
+  for (const appeal of appeals) {
+    const date = appealCreatedLocalDate(appeal.createdAt);
+    const current =
+      map.get(date) ??
+      ({
+        date,
+        label: formatAppealStatisticsDayLabel(date),
+        total: 0,
+        open: 0,
+        inProgress: 0,
+        closed: 0,
+      } satisfies AppealsStatisticsTimelineRow);
+
+    current.total += 1;
+    if (appeal.status === "open") current.open += 1;
+    else if (appeal.status === "in_progress") current.inProgress += 1;
+    else if (appeal.status === "closed") current.closed += 1;
+
+    map.set(date, current);
+  }
+
+  return [...map.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function fillAppealsStatisticsTimeline(
+  timeline: AppealsStatisticsTimelineRow[],
+  from: string,
+  to: string,
+): AppealsStatisticsTimelineRow[] {
+  const map = new Map(timeline.map((row) => [row.date, row]));
+  const start = parseDateInput(from);
+  const end = parseDateInput(to);
+  if (!start || !end) return timeline;
+
+  const result: AppealsStatisticsTimelineRow[] = [];
+  for (const day of iterateDateRange(start, end)) {
+    const date = toDateString(day);
+    result.push(
+      map.get(date) ?? {
+        date,
+        label: day.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }),
+        total: 0,
+        open: 0,
+        inProgress: 0,
+        closed: 0,
+      },
+    );
+  }
+  return result;
+}
+
+function iterateDateRange(from: Date, to: Date): Date[] {
+  const days: Date[] = [];
+  const cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+  while (cursor <= end) {
+    days.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return days;
+}
+
+function buildAppealsStatisticsBreakdown(
+  appeals: Appeal[],
+  pick: (appeal: Appeal) => { key: string; label: string },
+  maxItems = 12,
+): AppealsStatisticsBreakdownRow[] {
+  const map = new Map<string, AppealsStatisticsBreakdownRow>();
+
+  for (const appeal of appeals) {
+    const { key, label } = pick(appeal);
+    const current =
+      map.get(key) ??
+      ({
+        key,
+        label,
+        total: 0,
+        open: 0,
+        inProgress: 0,
+        closed: 0,
+      } satisfies AppealsStatisticsBreakdownRow);
+
+    current.total += 1;
+    if (appeal.status === "open") current.open += 1;
+    else if (appeal.status === "in_progress") current.inProgress += 1;
+    else if (appeal.status === "closed") current.closed += 1;
+
+    map.set(key, current);
+  }
+
+  return [...map.values()].sort((a, b) => b.total - a.total).slice(0, maxItems);
+}
+
 export async function handleSupportGroupMessage(
   input: SupportMessageInput,
 ): Promise<SupportMessageResult> {
@@ -2291,6 +2672,15 @@ async function appendToRecentAppeal(
     photoUrl: input.photoUrl,
   });
 
+  if (input.messageThreadId) {
+    await sql()`
+      UPDATE support_appeals
+      SET telegram_thread_id = coalesce(telegram_thread_id, ${input.messageThreadId}),
+          updated_at = now()
+      WHERE id = ${recent.id}
+    `;
+  }
+
   if (input.photoUrl) {
     await sql()`
       UPDATE support_appeals
@@ -2411,7 +2801,7 @@ async function createAppealFromChatMessage(
       courier_last_name, phone, phone_model, os, app_version, photo_url,
       photo_analysis, description_normalized, category, classification, subcategory, priority,
       confidence, classification_source, order_number, issue_text, ai_summary, ai_suggested_reply,
-      operator_reply, result_text, point_id, intake_source_code
+      operator_reply, result_text, point_id, intake_source_code, telegram_thread_id
     )
     VALUES (
       ${source}, 'open', ${input.chatId}, ${input.userId}, ${draft.messageId ?? input.messageId},
@@ -2424,7 +2814,8 @@ async function createAppealFromChatMessage(
       ${suggestion.summary}, ${suggestion.suggestedReply},
       NULL, NULL,
       ${appealPointId ?? null},
-      ${intakeSourceCode}
+      ${intakeSourceCode},
+      ${source === "telegram" ? input.messageThreadId ?? null : null}
     )
     RETURNING id, appeal_number
   `;
@@ -2476,6 +2867,18 @@ async function createAppealFromChatMessage(
     preview: description,
     domain: source === "telegram" ? "appeals" : "appeals",
   });
+
+  if (source === "max") {
+    void triageAppealForJira({
+      appealNumber,
+      description,
+      category: classification.category,
+      categoryLabel: classification.categoryLabel,
+      priority: classification.priority,
+      pointId: appealPointId ?? null,
+    });
+  }
+
   return { action: "created", appealNumber, reply };
 }
 
@@ -3083,6 +3486,95 @@ type AdminEmployeeRow = {
   maxAccount: string | null;
 };
 
+function filterAdminInitiatorAppeals(
+  appeals: Appeal[],
+  adminRows: AdminEmployeeRow[],
+): Appeal[] {
+  if (adminRows.length === 0) return appeals;
+  return appeals.filter((appeal) => {
+    if (appeal.source !== "max") return true;
+    return !appealInitiatorIsAdmin(appeal, adminRows);
+  });
+}
+
+function sanitizeCourierAppealPoint(appeal: Appeal): Appeal {
+  if (appeal.source !== "max") return appeal;
+  if (!appeal.pointName || !isCourierExcludedPointName(appeal.pointName)) return appeal;
+  return { ...appeal, pointId: null, pointName: null };
+}
+
+export async function reconcileCourierAppealData(): Promise<{
+  clearedInternalPoints: number;
+  reassignedPoints: number;
+  adminMaxAppeals: number;
+}> {
+  await ensureAppealsSchema();
+  const excluded = await sql()`
+    SELECT id FROM delivery_points
+    WHERE lower(name) IN ('колл центр', 'центральный офис', 'бухгалтерия')
+  `;
+  const excludedIds = excluded.map((row) => String(row.id));
+
+  let clearedInternalPoints = 0;
+  if (excludedIds.length > 0) {
+    const cleared = await sql()`
+      UPDATE support_appeals
+      SET point_id = NULL, updated_at = now()
+      WHERE source = 'max'
+        AND merged_into_id IS NULL
+        AND point_id = ANY(${excludedIds}::uuid[])
+      RETURNING id
+    `;
+    clearedInternalPoints = cleared.length;
+  }
+
+  const adminRows = await loadAdminEmployeeRows();
+  const candidates = await sql()`
+    SELECT a.id, a.issue_text, a.max_user_id, e.point_id AS profile_point_id
+    FROM support_appeals a
+    LEFT JOIN employees e ON e.max_user_id = a.max_user_id
+    WHERE a.merged_into_id IS NULL
+      AND a.source = 'max'
+      AND a.point_id IS NULL
+    ORDER BY a.created_at DESC
+    LIMIT 500
+  `;
+
+  let reassignedPoints = 0;
+  for (const row of candidates) {
+    const appeal = await getAppeal(String(row.id));
+    if (!appeal || appealInitiatorIsAdmin(appeal, adminRows)) continue;
+
+    const pointId = await resolveAppealPointId({
+      text: appeal.issueText,
+      profilePointId: row.profile_point_id ? String(row.profile_point_id) : null,
+      maxUserId: appeal.maxUserId ?? undefined,
+      forCourier: true,
+    });
+    if (!pointId) continue;
+
+    await sql()`
+      UPDATE support_appeals
+      SET point_id = ${pointId}, updated_at = now()
+      WHERE id = ${String(row.id)} AND point_id IS NULL
+    `;
+    reassignedPoints += 1;
+  }
+
+  const allMax = await sql()`
+    SELECT max_user_id, source FROM support_appeals
+    WHERE source = 'max' AND merged_into_id IS NULL
+  `;
+  const adminMaxAppeals = allMax.filter((row) =>
+    appealInitiatorIsAdmin(
+      { maxUserId: nullableString(row.max_user_id), source: String(row.source) },
+      adminRows,
+    ),
+  ).length;
+
+  return { clearedInternalPoints, reassignedPoints, adminMaxAppeals };
+}
+
 async function loadAdminEmployeeRows(): Promise<AdminEmployeeRow[]> {
   const rows = await sql()`
     SELECT max_user_id, telegram_account, max_account
@@ -3146,10 +3638,19 @@ async function resolveAppealPointId(input: {
   text: string;
   profilePointId?: string | null;
   maxUserId?: string;
+  forCourier?: boolean;
 }): Promise<string | null> {
-  const resolved = await resolveDeliveryPointFromText(input.text, input.profilePointId);
+  const forCourier = input.forCourier ?? Boolean(input.maxUserId);
+  const resolved = await resolveDeliveryPointFromText(input.text, input.profilePointId, {
+    allowAi: false,
+    forCourier,
+  });
   if (!resolved || resolved.confidence < 0.65) {
-    return input.profilePointId ?? null;
+    const fallback = input.profilePointId ?? null;
+    if (!fallback || !forCourier) return fallback;
+    const point = await getDeliveryPoint(fallback);
+    if (point && isCourierExcludedPointName(point.name)) return null;
+    return fallback;
   }
 
   if (
@@ -3202,22 +3703,41 @@ async function upsertCourierProfile(
 }
 
 function resolveAnalyticsDateRange(range?: { from?: string | null; to?: string | null }) {
-  const today = new Date();
-  const defaultFrom = new Date(today);
-  defaultFrom.setDate(defaultFrom.getDate() - 30);
-
-  let fromDate = parseDateInput(range?.from) ?? defaultFrom;
-  let toDate = parseDateInput(range?.to) ?? today;
-  if (fromDate > toDate) {
-    const swap = fromDate;
-    fromDate = toDate;
-    toDate = swap;
+  const todayStr = formatDateInAppTimezone(new Date());
+  let from = range?.from?.trim() && parseDateInput(range.from) ? range.from.trim() : shiftDateString(todayStr, -30);
+  let to = range?.to?.trim() && parseDateInput(range.to) ? range.to.trim() : todayStr;
+  if (from > to) {
+    const swap = from;
+    from = to;
+    to = swap;
   }
 
-  return {
-    from: toDateString(fromDate),
-    to: toDateString(toDate),
-  };
+  return { from, to };
+}
+
+function formatDateInAppTimezone(date: Date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function appealCreatedLocalDate(iso: string) {
+  return formatDateInAppTimezone(new Date(iso));
+}
+
+function formatAppealStatisticsDayLabel(date: string) {
+  const [, month, day] = date.split("-");
+  return `${day}.${month}`;
+}
+
+function shiftDateString(date: string, days: number) {
+  const parsed = parseDateInput(date);
+  if (!parsed) return date;
+  parsed.setDate(parsed.getDate() + days);
+  return toDateString(parsed);
 }
 
 function parseDateInput(value?: string | null) {
@@ -3264,6 +3784,7 @@ function toAppeal(row: postgres.Row): Appeal {
     status: row.status as AppealStatus,
     maxChatId: nullableString(row.max_chat_id),
     maxUserId: nullableString(row.max_user_id),
+    telegramThreadId: nullableString(row.telegram_thread_id),
     senderName: nullableString(row.sender_name),
     courierLastName: nullableString(row.courier_last_name),
     phone: nullableString(row.phone),

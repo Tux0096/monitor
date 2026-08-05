@@ -41,6 +41,11 @@ const ENV_KEYS = new Set([
   "PAGESPEED_API_KEY",
   "PAGESPEED_SITE_URL",
   "BIGQUERY_LOCATION",
+  "JIRA_BASE_URL",
+  "JIRA_TOKEN",
+  "JIRA_PROJECT_KEY",
+  "TELEGRAM_FIXBAG_CHAT_ID",
+  "FUJI_NEW_DATABASE_URL",
 ]);
 
 let fileCache: Map<string, string> | null = null;

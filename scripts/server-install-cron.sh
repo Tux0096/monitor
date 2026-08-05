@@ -14,15 +14,19 @@ fi
 LINE="15 3 * * * curl -fsS -X POST -H \"x-monitor-import-secret: ${SECRET}\" \"http://127.0.0.1:${PORT}/api/firebase/performance/import\" >> /opt/monitor/import.log 2>&1"
 # Синтетический мониторинг сайта и МП — каждые 10 минут (живые замеры времени отклика)
 PROBE_LINE="*/10 * * * * curl -fsS -X POST -H \"x-monitor-import-secret: ${SECRET}\" \"http://127.0.0.1:${PORT}/api/monitoring/probe\" >> /opt/monitor/probe.log 2>&1"
+# Синхронизация курьеров и точек с реальной БД (fuji_new) — раз в сутки
+FUJI_SYNC_LINE="5 4 * * * curl -fsS -X GET -H \"x-monitor-import-secret: ${SECRET}\" \"http://127.0.0.1:${PORT}/api/internal/sync-fuji-new\" >> /opt/monitor/fuji-new-sync.log 2>&1"
 
 TMP=$(mktemp)
 crontab -l 2>/dev/null \
   | grep -v '/api/firebase/performance/import' \
-  | grep -v '/api/monitoring/probe' > "${TMP}" || true
+  | grep -v '/api/monitoring/probe' \
+  | grep -v '/api/internal/sync-fuji-new' > "${TMP}" || true
 echo "${LINE}" >> "${TMP}"
 echo "${PROBE_LINE}" >> "${TMP}"
+echo "${FUJI_SYNC_LINE}" >> "${TMP}"
 crontab "${TMP}"
 rm -f "${TMP}"
 
 echo "cron_installed"
-crontab -l | grep -cE 'performance/import|monitoring/probe'
+crontab -l | grep -cE 'performance/import|monitoring/probe|sync-fuji-new'

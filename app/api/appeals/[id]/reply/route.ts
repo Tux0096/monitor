@@ -1,6 +1,5 @@
 import { auth } from "@/auth";
-import { addOperatorReply, closeAppeal, getAppeal } from "@/lib/appeals";
-import { sendMaxMessage } from "@/lib/max-bot";
+import { closeAppeal, getAppeal, sendOperatorReplyToAppealChat } from "@/lib/appeals";
 
 export const runtime = "nodejs";
 
@@ -28,16 +27,17 @@ export async function POST(
     return Response.json({ error: "Not found" }, { status: 404 });
   }
   if (!appeal.maxChatId) {
-    return Response.json({ error: "У обращения нет MAX chat_id" }, { status: 400 });
+    return Response.json({ error: "У обращения нет chat_id для ответа в мессенджер" }, { status: 400 });
   }
 
-  const message = `Ответ по обращению №${appeal.appealNumber}: ${text}`;
-  await sendMaxMessage(appeal.maxChatId, message);
-  await addOperatorReply(id, text);
+  try {
+    await sendOperatorReplyToAppealChat(id, text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Не удалось отправить сообщение";
+    return Response.json({ error: message }, { status: 502 });
+  }
 
-  const updated = body.close
-    ? await closeAppeal(id, text)
-    : await getAppeal(id);
+  const updated = body.close ? await closeAppeal(id, text) : await getAppeal(id);
 
   return Response.json({ appeal: updated });
 }
