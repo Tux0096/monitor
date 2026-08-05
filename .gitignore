@@ -24,6 +24,8 @@ node_modules/
 # misc
 .DS_Store
 *.pem
+.gh-token
+.gh-token.*
 deploy_bundle.tar.gz
 deploy_bundle_*.tar.gz
 push_deploy.tar.gz
