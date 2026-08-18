@@ -1,18 +1,12 @@
 import postgres from "postgres";
 
-import { getConfig } from "../config.js";
+/**
+ * Своя база кабинета — та же monitor_core, таблицы с префиксом cab_.
+ *
+ * Клиент создаётся при импорте, а не лениво: ленивый Proxy не работает
+ * как tagged template, потому что цель прокси обязана быть функцией.
+ */
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error("DATABASE_URL is required");
 
-let client: postgres.Sql | null = null;
-
-/** Своя база кабинета — та же monitor_core, таблицы с префиксом cab_. */
-export const sql: postgres.Sql = new Proxy({} as postgres.Sql, {
-  get(_target, prop) {
-    client ??= postgres(getConfig().databaseUrl, { max: 10 });
-    const value = Reflect.get(client, prop);
-    return typeof value === "function" ? value.bind(client) : value;
-  },
-  apply(_target, _thisArg, args) {
-    client ??= postgres(getConfig().databaseUrl, { max: 10 });
-    return (client as unknown as (...a: unknown[]) => unknown)(...args);
-  },
-}) as postgres.Sql;
+export const sql = postgres(url, { max: 10 });
