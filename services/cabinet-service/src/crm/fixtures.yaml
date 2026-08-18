@@ -1,0 +1,95 @@
+# Фикстуры режима CRM_SOURCE=seed.
+#
+# Данные вымышленные. Нужны, чтобы разрабатывать и приёмить кабинет,
+# не подключаясь к боевой базе с персональными данными сотрудников.
+#
+# Состав по промту: 2 компании, 5 предприятий, 8 должностей, 30+ работников.
+
+companies:
+  - { id: 1, name: "Фуджи" }
+  - { id: 2, name: "Сакура" }
+
+departments:
+  - { id: 100, name: "Самара — Московское шоссе", city: "Самара", address: "Московское ш., 24", company_id: 1 }
+  - { id: 101, name: "Самара — Ново-Садовая", city: "Самара", address: "Ново-Садовая, 106", company_id: 1 }
+  - { id: 102, name: "Самара — Стара Загора", city: "Самара", address: "Стара Загора, 77", company_id: 1 }
+  - { id: 200, name: "Тольятти — Автозаводское", city: "Тольятти", address: "Автозаводское ш., 15", company_id: 1 }
+  - { id: 201, name: "Тольятти — Революционная", city: "Тольятти", address: "Революционная, 52", company_id: 2 }
+
+posts:
+  - { id: 10, name: "Управляющий" }
+  - { id: 11, name: "Заместитель управляющего" }
+  - { id: 20, name: "Курьер" }
+  - { id: 21, name: "Пеший курьер" }
+  - { id: 30, name: "Повар" }
+  - { id: 31, name: "Су-шеф" }
+  - { id: 40, name: "Кассир" }
+  - { id: 50, name: "Оператор колл-центра" }
+
+# telegram_id заполнен не у всех — это штатная ситуация,
+# на ней проверяется привязка через requestContact.
+workers:
+  - { id: 1001, l_name: "Смирнов", f_name: "Алексей", o_name: "Петрович", phone: "+7 999 100 10 01", telegram_id: 500000001, post_id: 10, department_id: 100, employment_date: "2021-03-15", state: 1, iiko_id: "IIKO-1001" }
+  - { id: 1002, l_name: "Кузнецова", f_name: "Мария", o_name: "Ивановна", phone: "+7 999 100 10 02", telegram_id: 500000002, post_id: 11, department_id: 100, employment_date: "2022-06-01", state: 1, iiko_id: "IIKO-1002" }
+  - { id: 1003, l_name: "Попов", f_name: "Дмитрий", o_name: "Сергеевич", phone: "89991001003", telegram_id: null, post_id: 20, department_id: 100, employment_date: "2024-01-10", state: 1, iiko_id: null }
+  - { id: 1004, l_name: "Волкова", f_name: "Анна", o_name: "Олеговна", phone: "+7 999 100 10 04", telegram_id: 500000004, post_id: 20, department_id: 100, employment_date: "2023-09-05", state: 1, iiko_id: null }
+  - { id: 1005, l_name: "Соколов", f_name: "Игорь", o_name: "Валерьевич", phone: "+7 999 100 10 05", telegram_id: 500000005, post_id: 30, department_id: 100, employment_date: "2020-11-20", state: 1, iiko_id: "IIKO-1005" }
+  - { id: 1006, l_name: "Лебедева", f_name: "Ольга", o_name: "Николаевна", phone: "+7 999 100 10 06", telegram_id: null, post_id: 40, department_id: 100, employment_date: "2023-02-14", state: 1, iiko_id: null }
+  - { id: 1007, l_name: "Новиков", f_name: "Павел", o_name: "Андреевич", phone: "+7 999 100 10 07", telegram_id: 500000007, post_id: 21, department_id: 101, employment_date: "2024-05-30", state: 1, iiko_id: null }
+  - { id: 1008, l_name: "Морозова", f_name: "Елена", o_name: "Дмитриевна", phone: "+7 999 100 10 08", telegram_id: 500000008, post_id: 10, department_id: 101, employment_date: "2019-08-01", state: 1, iiko_id: "IIKO-1008" }
+  - { id: 1009, l_name: "Петров", f_name: "Сергей", o_name: "Ильич", phone: "+7 999 100 10 09", telegram_id: null, post_id: 20, department_id: 101, employment_date: "2024-07-12", state: 1, iiko_id: null }
+  - { id: 1010, l_name: "Васильева", f_name: "Наталья", o_name: "Юрьевна", phone: "+7 999 100 10 10", telegram_id: 500000010, post_id: 31, department_id: 101, employment_date: "2022-04-18", state: 1, iiko_id: "IIKO-1010" }
+  # Уволенный: должен терять доступ на каждом входе, а не только при привязке
+  - { id: 1011, l_name: "Зайцев", f_name: "Роман", o_name: "Викторович", phone: "+7 999 100 10 11", telegram_id: 500000011, post_id: 20, department_id: 101, employment_date: "2023-01-09", state: 0, iiko_id: null }
+  - { id: 1012, l_name: "Крылова", f_name: "Ирина", o_name: "Сергеевна", phone: "+7 999 100 10 12", telegram_id: 500000012, post_id: 50, department_id: 102, employment_date: "2023-11-27", state: 1, iiko_id: null }
+  - { id: 1013, l_name: "Орлов", f_name: "Максим", o_name: "Геннадьевич", phone: "+7 999 100 10 13", telegram_id: null, post_id: 30, department_id: 102, employment_date: "2021-06-03", state: 1, iiko_id: "IIKO-1013" }
+  - { id: 1014, l_name: "Фёдорова", f_name: "Дарья", o_name: "Александровна", phone: "+7 999 100 10 14", telegram_id: 500000014, post_id: 40, department_id: 102, employment_date: "2024-02-19", state: 1, iiko_id: null }
+  - { id: 1015, l_name: "Медведев", f_name: "Артём", o_name: "Русланович", phone: "+7 999 100 10 15", telegram_id: 500000015, post_id: 10, department_id: 102, employment_date: "2020-05-22", state: 1, iiko_id: "IIKO-1015" }
+  - { id: 1016, l_name: "Егорова", f_name: "Светлана", o_name: "Павловна", phone: "+7 999 100 10 16", telegram_id: null, post_id: 20, department_id: 102, employment_date: "2024-09-01", state: 1, iiko_id: null }
+  - { id: 1017, l_name: "Тарасов", f_name: "Кирилл", o_name: "Егорович", phone: "+7 999 100 10 17", telegram_id: 500000017, post_id: 10, department_id: 200, employment_date: "2018-12-11", state: 1, iiko_id: "IIKO-1017" }
+  - { id: 1018, l_name: "Белова", f_name: "Юлия", o_name: "Романовна", phone: "+7 999 100 10 18", telegram_id: 500000018, post_id: 11, department_id: 200, employment_date: "2022-08-08", state: 1, iiko_id: null }
+  - { id: 1019, l_name: "Комаров", f_name: "Никита", o_name: "Денисович", phone: "+7 999 100 10 19", telegram_id: null, post_id: 20, department_id: 200, employment_date: "2024-03-25", state: 1, iiko_id: null }
+  - { id: 1020, l_name: "Никитина", f_name: "Алина", o_name: "Игоревна", phone: "+7 999 100 10 20", telegram_id: 500000020, post_id: 30, department_id: 200, employment_date: "2021-10-14", state: 1, iiko_id: "IIKO-1020" }
+  - { id: 1021, l_name: "Гаврилов", f_name: "Владимир", o_name: "Тимофеевич", phone: "+7 999 100 10 21", telegram_id: 500000021, post_id: 21, department_id: 200, employment_date: "2023-05-17", state: 1, iiko_id: null }
+  - { id: 1022, l_name: "Симонова", f_name: "Кристина", o_name: "Львовна", phone: "+7 999 100 10 22", telegram_id: null, post_id: 40, department_id: 200, employment_date: "2024-06-06", state: 1, iiko_id: null }
+  - { id: 1023, l_name: "Кравцов", f_name: "Денис", o_name: "Олегович", phone: "+7 999 100 10 23", telegram_id: 500000023, post_id: 10, department_id: 201, employment_date: "2019-04-02", state: 1, iiko_id: "IIKO-1023" }
+  - { id: 1024, l_name: "Романова", f_name: "Полина", o_name: "Вадимовна", phone: "+7 999 100 10 24", telegram_id: 500000024, post_id: 50, department_id: 201, employment_date: "2023-07-21", state: 1, iiko_id: null }
+  - { id: 1025, l_name: "Дьяков", f_name: "Станислав", o_name: "Юрьевич", phone: "+7 999 100 10 25", telegram_id: null, post_id: 20, department_id: 201, employment_date: "2024-08-13", state: 1, iiko_id: null }
+  - { id: 1026, l_name: "Ковалёва", f_name: "Татьяна", o_name: "Борисовна", phone: "+7 999 100 10 26", telegram_id: 500000026, post_id: 31, department_id: 201, employment_date: "2022-01-31", state: 1, iiko_id: "IIKO-1026" }
+  - { id: 1027, l_name: "Логинов", f_name: "Григорий", o_name: "Эдуардович", phone: "+7 999 100 10 27", telegram_id: 500000027, post_id: 30, department_id: 201, employment_date: "2021-09-09", state: 1, iiko_id: null }
+  - { id: 1028, l_name: "Шевцова", f_name: "Вероника", o_name: "Артёмовна", phone: "+7 999 100 10 28", telegram_id: null, post_id: 40, department_id: 201, employment_date: "2024-04-04", state: 1, iiko_id: null }
+  - { id: 1029, l_name: "Панов", f_name: "Тимур", o_name: "Маратович", phone: "+7 999 100 10 29", telegram_id: 500000029, post_id: 20, department_id: 100, employment_date: "2024-10-10", state: 1, iiko_id: null }
+  - { id: 1030, l_name: "Астафьева", f_name: "Ксения", o_name: "Владимировна", phone: "+7 999 100 10 30", telegram_id: 500000030, post_id: 11, department_id: 102, employment_date: "2023-03-03", state: 1, iiko_id: null }
+  - { id: 1031, l_name: "Юдин", f_name: "Леонид", o_name: "Семёнович", phone: "+7 999 100 10 31", telegram_id: null, post_id: 21, department_id: 101, employment_date: "2024-11-11", state: 1, iiko_id: null }
+  - { id: 1032, l_name: "Селезнёва", f_name: "Маргарита", o_name: "Игнатьевна", phone: "+7 999 100 10 32", telegram_id: 500000032, post_id: 50, department_id: 100, employment_date: "2022-12-25", state: 1, iiko_id: null }
+
+# Руководители: chief_id -> employee_id
+subordinations:
+  - { chief_id: 1001, employee_id: 1003 }
+  - { chief_id: 1001, employee_id: 1004 }
+  - { chief_id: 1001, employee_id: 1005 }
+  - { chief_id: 1001, employee_id: 1029 }
+  - { chief_id: 1008, employee_id: 1007 }
+  - { chief_id: 1008, employee_id: 1009 }
+  - { chief_id: 1017, employee_id: 1019 }
+  - { chief_id: 1017, employee_id: 1021 }
+
+account_logins:
+  - { worker_id: 1001, cop_mail_login: "a.smirnov@fuji.ru", liko_login: "smirnov", bitrix_login: "asmirnov", pyrus_login: "a.smirnov", check_office_login: "smirnov_a", pbi_login: "a.smirnov@fuji.ru" }
+  - { worker_id: 1008, cop_mail_login: "e.morozova@fuji.ru", liko_login: "morozova", bitrix_login: "emorozova", pyrus_login: null, check_office_login: "morozova_e", pbi_login: null }
+  - { worker_id: 1017, cop_mail_login: "k.tarasov@fuji.ru", liko_login: "tarasov", bitrix_login: null, pyrus_login: "k.tarasov", check_office_login: null, pbi_login: null }
+
+material_values:
+  - { worker_id: 1003, item: "Термосумка большая", quanity: 1, price: 3400, inventory_number: "TS-0042", issue_date: "2024-01-15", return_date: null }
+  - { worker_id: 1003, item: "Куртка форменная", quanity: 1, price: 5200, inventory_number: "KF-0117", issue_date: "2024-01-15", return_date: null }
+  - { worker_id: 1004, item: "Термосумка малая", quanity: 1, price: 2100, inventory_number: "TS-0088", issue_date: "2023-09-10", return_date: null }
+  - { worker_id: 1001, item: "Ноутбук", quanity: 1, price: 68000, inventory_number: "NB-0009", issue_date: "2021-03-20", return_date: null }
+  - { worker_id: 1005, item: "Нож поварской", quanity: 2, price: 1800, inventory_number: "NP-0231", issue_date: "2020-12-01", return_date: "2024-05-05" }
+
+work_times:
+  - { worker_id: 1003, day: "2026-08-01", work_begin: "10:00", work_end: "22:00", work_duration: 12, rating: 5, fine: 0, department_id: 100 }
+  - { worker_id: 1003, day: "2026-08-02", work_begin: "10:00", work_end: "22:00", work_duration: 12, rating: 4, fine: 0, department_id: 100 }
+  - { worker_id: 1003, day: "2026-08-04", work_begin: "12:00", work_end: "23:00", work_duration: 11, rating: 5, fine: 0, department_id: 100 }
+  - { worker_id: 1003, day: "2026-08-05", work_begin: "10:00", work_end: "21:00", work_duration: 11, rating: 3, fine: 500, department_id: 100 }
+  - { worker_id: 1004, day: "2026-08-01", work_begin: "11:00", work_end: "23:00", work_duration: 12, rating: 5, fine: 0, department_id: 100 }
+  - { worker_id: 1004, day: "2026-08-03", work_begin: "11:00", work_end: "23:00", work_duration: 12, rating: 5, fine: 0, department_id: 100 }
