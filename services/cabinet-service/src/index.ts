@@ -12,6 +12,20 @@ import {
   verifyAccess,
   type SessionClaims,
 } from "./auth/sessions.js";
+import {
+  approveLinkRequest,
+  createAudience,
+  listAudiences,
+  listAudit,
+  listLinkRequests,
+  listNewsAdmin,
+  listRefs,
+  publishNews,
+  rejectLinkRequest,
+  syncRefs,
+  unpublishNews,
+  upsertNews,
+} from "./admin.js";
 import { getConfig } from "./config.js";
 import { getCRMReader, verifyCRMOnStartup } from "./crm/index.js";
 import { BenefitNotAvailable, PoolExhausted, claimBenefit } from "./benefits.js";
@@ -415,6 +429,137 @@ export async function buildApp() {
       }
     },
   );
+
+  // ── Админ-API ──────────────────────────────────────────────────────────
+  //
+  // Авторизация — service secret от web: дашборд уже проверил сессию
+  // администратора, второй раз спрашивать пароль незачем. Наружу порт
+  // 3106 не открыт, ходить сюда можно только с самого сервера.
+
+  function adminEmail(req: { headers: Record<string, unknown> }): string | null {
+    const secret = String(req.headers["x-monitor-import-secret"] ?? "").trim();
+    if (!config.serviceSecret || secret !== config.serviceSecret) return null;
+    return String(req.headers["x-monitor-user-email"] ?? "admin").trim() || "admin";
+  }
+
+  app.get("/admin/refs", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return listRefs();
+  });
+
+  app.post("/admin/refs/sync", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return syncRefs(who);
+  });
+
+  app.get("/admin/link-requests", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const q = req.query as Record<string, string | undefined>;
+    return { items: await listLinkRequests(q.status ?? null) };
+  });
+
+  app.post("/admin/link-requests/:id/approve", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as { workerId?: number };
+    if (!body.workerId) return problem(reply, 400, "no_worker", "не указан сотрудник");
+    const result = await approveLinkRequest(
+      Number((req.params as { id: string }).id),
+      Number(body.workerId),
+      who,
+    );
+    if (!result.ok) return problem(reply, 409, "approve_failed", result.reason ?? "не удалось");
+    return { status: "ok" };
+  });
+
+  app.post("/admin/link-requests/:id/reject", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as { comment?: string };
+    const result = await rejectLinkRequest(
+      Number((req.params as { id: string }).id),
+      who,
+      body.comment ?? null,
+    );
+    if (!result.ok) return problem(reply, 409, "reject_failed", result.reason ?? "не удалось");
+    return { status: "ok" };
+  });
+
+  app.get("/admin/audiences", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return { items: await listAudiences() };
+  });
+
+  app.post("/admin/audiences", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as {
+      name?: string;
+      isEveryone?: boolean;
+      rules?: Array<{ postIds?: number[]; departmentIds?: number[] }>;
+    };
+    if (!body.name?.trim()) return problem(reply, 400, "no_name", "не указано название");
+    return createAudience(
+      {
+        name: body.name.trim(),
+        isEveryone: body.isEveryone === true,
+        rules: (body.rules ?? []).map((r) => ({
+          postIds: r.postIds ?? [],
+          departmentIds: r.departmentIds ?? [],
+        })),
+      },
+      who,
+    );
+  });
+
+  app.get("/admin/news", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return { items: await listNewsAdmin() };
+  });
+
+  app.post("/admin/news", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as {
+      id?: number;
+      title?: string;
+      lead?: string;
+      bodyMd?: string;
+      audienceId?: number | null;
+    };
+    if (!body.title?.trim()) return problem(reply, 400, "no_title", "не указан заголовок");
+    return upsertNews(
+      {
+        id: body.id,
+        title: body.title.trim(),
+        lead: body.lead?.trim() || null,
+        bodyMd: body.bodyMd ?? "",
+        audienceId: body.audienceId ?? null,
+      },
+      who,
+    );
+  });
+
+  app.post("/admin/news/:id/publish", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const result = await publishNews(Number((req.params as { id: string }).id), who);
+    if (!result.ok) return problem(reply, 409, "publish_failed", result.reason ?? "не удалось");
+    return { status: "ok" };
+  });
+
+  app.post("/admin/news/:id/unpublish", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    await unpublishNews(Number((req.params as { id: string }).id), who);
+    return { status: "ok" };
+  });
+
+  app.get("/admin/audit", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return { items: await listAudit(100) };
+  });
 
   return app;
 }

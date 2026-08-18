@@ -1,6 +1,8 @@
 import { auth } from "@/auth";
 import { readCabinetOverview } from "@/lib/cabinet-service-client";
 
+import { CabinetAdmin } from "./cabinet-admin";
+
 export const dynamic = "force-dynamic";
 
 function StatusPill({ ok, label }: { ok: boolean; label: string }) {
@@ -131,14 +133,18 @@ export default async function CabinetPage() {
         </div>
       </section>
 
+      {overview.available ? <CabinetAdmin /> : null}
+
       <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
         <h2 className="text-sm font-medium text-white">Готовность</h2>
         <ul className="mt-3 space-y-1.5 text-sm text-zinc-400">
           <li>✓ Вход по подписи Telegram, сессии с ротацией refresh</li>
           <li>✓ Карточка сотрудника из CRM, доступы, матценности, смены</li>
           <li>✓ Привязка по номеру телефона и заявки администратору</li>
-          <li className="text-zinc-600">— Новости, база знаний, бонусы</li>
-          <li className="text-zinc-600">— Управление аудиториями и контентом</li>
+          <li>✓ Новости, база знаний с поиском, бонусы с пулом промокодов</li>
+          <li>✓ Аудитории, публикация новостей, журнал действий</li>
+          <li className="text-zinc-600">— Фото сотрудников и пуш о новостях</li>
+          <li className="text-zinc-600">— Редактор базы знаний и загрузка пула кодов</li>
         </ul>
       </section>
     </main>
