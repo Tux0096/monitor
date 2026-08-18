@@ -111,6 +111,43 @@ services:
       timeout: 5s
       retries: 5
 
+  cabinet-service:
+    build:
+      context: ./services/cabinet-service
+      dockerfile: Dockerfile
+    container_name: monitor-cabinet-service
+    restart: unless-stopped
+    networks:
+      - monitor-net
+    depends_on:
+      monitor-postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3106"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-monitor}:${POSTGRES_PASSWORD}@monitor-postgres:5432/monitor_core
+      # Кабинет живёт на текущем боте: поддержка продолжает работать как раньше,
+      # добавляется только кнопка запуска Mini App.
+      CABINET_BOT_TOKEN: ${CABINET_BOT_TOKEN:-}
+      MINIAPP_PUBLIC_URL: ${MINIAPP_PUBLIC_URL:-https://it.franchise-fuji.ru/cabinet}
+      # seed — фикстуры, ни одного внешнего подключения.
+      # Переключение на боевую CRM — смена этой строки, не правка кода.
+      CRM_SOURCE: ${CABINET_CRM_SOURCE:-seed}
+      CRM_DSN: ${CABINET_CRM_DSN:-}
+      JWT_SECRET: ${CABINET_JWT_SECRET:-}
+      ACCESS_TTL_MIN: "15"
+      REFRESH_TTL_DAYS: "30"
+      INIT_DATA_MAX_AGE_SEC: "60"
+      CABINET_ALLOWED_ORIGINS: ${CABINET_ALLOWED_ORIGINS:-https://it.franchise-fuji.ru,https://web.telegram.org}
+      PERFORMANCE_IMPORT_SECRET: ${PERFORMANCE_IMPORT_SECRET:-}
+    ports:
+      - "127.0.0.1:3106:3106"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3106/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   monitor-net:
     name: monitor-net

@@ -23,6 +23,7 @@ const primaryNav: NavItem[] = [
 const moreNav: NavItem[] = [
   { href: "/dashboard/employees", label: "База сотрудников", shortLabel: "Сотрудники" },
   { href: "/dashboard/points", label: "Точки", shortLabel: "Точки" },
+  { href: "/dashboard/cabinet", label: "Личный кабинет", shortLabel: "Кабинет" },
 ];
 
 function isActive(pathname: string, href: string) {
