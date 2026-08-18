@@ -14,6 +14,18 @@ import {
 } from "./auth/sessions.js";
 import { getConfig } from "./config.js";
 import { getCRMReader, verifyCRMOnStartup } from "./crm/index.js";
+import { BenefitNotAvailable, PoolExhausted, claimBenefit } from "./benefits.js";
+import {
+  getKbArticle,
+  getNews,
+  listBenefits,
+  listKbArticles,
+  listKbSections,
+  listNews,
+  markKbViewed,
+  markNewsRead,
+  searchKb,
+} from "./content.js";
 import { sql } from "./db/client.js";
 
 /** Ошибки в application/problem+json с машиночитаемым code (§8). */
@@ -261,6 +273,148 @@ export async function buildApp() {
     const limit = Math.min(Math.max(Number(query.limit) || 30, 1), 100);
     return getCRMReader().getWorktimes(claims.workerId, limit, query.cursor ?? null);
   });
+
+  // ── Контент ────────────────────────────────────────────────────────────
+
+  /**
+   * Область видимости сотрудника. Берётся из CRM на каждый запрос, а не
+   * из токена: перевод на другую точку должен менять доступ сразу,
+   * а не после истечения access-токена.
+   */
+  async function workerScope(claims: SessionClaims) {
+    const card = await getCRMReader().getWorkerById(claims.workerId);
+    if (!card || !card.isActive) return null;
+    return {
+      workerId: card.workerId,
+      postId: card.postId,
+      departmentId: card.departmentId,
+    };
+  }
+
+  app.get("/api/v1/news", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const q = req.query as Record<string, string | undefined>;
+    const limit = Math.min(Math.max(Number(q.limit) || 20, 1), 50);
+    return listNews(scope, limit, q.cursor ?? null);
+  });
+
+  app.get("/api/v1/news/:id", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const id = Number((req.params as { id: string }).id);
+    const item = await getNews(id, scope);
+    // 404, а не 403: существование скрытой новости не подтверждаем.
+    if (!item) return problem(reply, 404, "not_found", "новость не найдена");
+    return item;
+  });
+
+  app.post("/api/v1/news/:id/read", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const id = Number((req.params as { id: string }).id);
+    // Отметить прочитанной можно только то, что доступно.
+    if (!(await getNews(id, scope))) {
+      return problem(reply, 404, "not_found", "новость не найдена");
+    }
+    await markNewsRead(id, claims.workerId);
+    return { status: "ok" };
+  });
+
+  app.get("/api/v1/kb/sections", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    return { items: await listKbSections(scope) };
+  });
+
+  app.get("/api/v1/kb/sections/:id/articles", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const q = req.query as Record<string, string | undefined>;
+    const limit = Math.min(Math.max(Number(q.limit) || 20, 1), 50);
+    return listKbArticles(Number((req.params as { id: string }).id), scope, limit, q.cursor ?? null);
+  });
+
+  app.get("/api/v1/kb/articles/:id", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const item = await getKbArticle(Number((req.params as { id: string }).id), scope);
+    if (!item) return problem(reply, 404, "not_found", "статья не найдена");
+    return item;
+  });
+
+  app.post("/api/v1/kb/articles/:id/view", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const id = Number((req.params as { id: string }).id);
+    if (!(await getKbArticle(id, scope))) {
+      return problem(reply, 404, "not_found", "статья не найдена");
+    }
+    await markKbViewed(id, claims.workerId);
+    return { status: "ok" };
+  });
+
+  app.get("/api/v1/kb/search", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    const q = req.query as Record<string, string | undefined>;
+    return searchKb(q.q ?? "", scope, Math.min(Number(q.limit) || 20, 50));
+  });
+
+  app.get("/api/v1/benefits", async (req, reply) => {
+    const claims = await requireSession(req);
+    if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+    const scope = await workerScope(claims);
+    if (!scope) return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+    return { items: await listBenefits(scope, claims.workerId) };
+  });
+
+  /**
+   * Выдача персонального промокода. Идемпотентна по паре (бонус, сотрудник):
+   * двойной клик возвращает тот же код.
+   */
+  app.post("/api/v1/benefits/:id/claim",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (req, reply) => {
+      const claims = await requireSession(req);
+      if (!claims) return problem(reply, 401, "unauthorized", "нужен access-токен");
+      const scope = await workerScope(claims);
+      if (!scope) {
+        return problem(reply, 403, "worker_inactive", "сотрудник не числится действующим");
+      }
+
+      try {
+        return await claimBenefit(Number((req.params as { id: string }).id), scope);
+      } catch (error) {
+        if (error instanceof PoolExhausted) {
+          // Отдельный ответ, а не 500: пул кончился — это штатная ситуация,
+          // о которой надо сказать сотруднику и уведомить администратора.
+          req.log.warn({ benefitId: (req.params as { id: string }).id }, "пул промокодов исчерпан");
+          return problem(reply, 409, "pool_exhausted", "промокоды закончились");
+        }
+        if (error instanceof BenefitNotAvailable) {
+          return problem(reply, 409, error.code, error.message);
+        }
+        throw error;
+      }
+    },
+  );
 
   return app;
 }
