@@ -14,30 +14,35 @@ export type WorkerScopeDb = {
  *
  * Отбор идёт в SQL, а не в клиенте: скрытая статья не должна доезжать
  * до фронта ни в каком виде.
+ *
+ * Внутренние алиасы с префиксом _cab_ намеренно: короткие `a`, `r`, `rp`
+ * перекрывали внешние алиасы вызывающего запроса. Например в списке
+ * разделов БЗ статья тоже алиасилась как `a`, и `a.audience_id`
+ * разрешался в колонку cab_audience, которой там нет.
  */
 export function visibleTo(audienceColumn: string, worker: WorkerScopeDb) {
   const column = sql.unsafe(audienceColumn);
   return sql`(
     ${column} IS NULL
     OR EXISTS (
-      SELECT 1 FROM cab_audience a
-      WHERE a.id = ${column} AND a.is_everyone
+      SELECT 1 FROM cab_audience _cab_a
+      WHERE _cab_a.id = ${column} AND _cab_a.is_everyone
     )
     OR EXISTS (
-      SELECT 1 FROM cab_audience_rule r
-      WHERE r.audience_id = ${column}
+      SELECT 1 FROM cab_audience_rule _cab_r
+      WHERE _cab_r.audience_id = ${column}
         AND (
-          NOT EXISTS (SELECT 1 FROM cab_audience_rule_post rp WHERE rp.rule_id = r.id)
+          NOT EXISTS (SELECT 1 FROM cab_audience_rule_post _cab_rp WHERE _cab_rp.rule_id = _cab_r.id)
           OR EXISTS (
-            SELECT 1 FROM cab_audience_rule_post rp
-            WHERE rp.rule_id = r.id AND rp.post_id = ${worker.postId}
+            SELECT 1 FROM cab_audience_rule_post _cab_rp
+            WHERE _cab_rp.rule_id = _cab_r.id AND _cab_rp.post_id = ${worker.postId}
           )
         )
         AND (
-          NOT EXISTS (SELECT 1 FROM cab_audience_rule_department rd WHERE rd.rule_id = r.id)
+          NOT EXISTS (SELECT 1 FROM cab_audience_rule_department _cab_rd WHERE _cab_rd.rule_id = _cab_r.id)
           OR EXISTS (
-            SELECT 1 FROM cab_audience_rule_department rd
-            WHERE rd.rule_id = r.id AND rd.department_id = ${worker.departmentId}
+            SELECT 1 FROM cab_audience_rule_department _cab_rd
+            WHERE _cab_rd.rule_id = _cab_r.id AND _cab_rd.department_id = ${worker.departmentId}
           )
         )
     )
@@ -52,22 +57,22 @@ export async function isAudienceVisible(
   if (audienceId == null) return true;
   const [row] = (await sql`
     SELECT (
-      EXISTS (SELECT 1 FROM cab_audience a WHERE a.id = ${audienceId} AND a.is_everyone)
+      EXISTS (SELECT 1 FROM cab_audience _cab_a WHERE _cab_a.id = ${audienceId} AND _cab_a.is_everyone)
       OR EXISTS (
-        SELECT 1 FROM cab_audience_rule r
-        WHERE r.audience_id = ${audienceId}
+        SELECT 1 FROM cab_audience_rule _cab_r
+        WHERE _cab_r.audience_id = ${audienceId}
           AND (
-            NOT EXISTS (SELECT 1 FROM cab_audience_rule_post rp WHERE rp.rule_id = r.id)
+            NOT EXISTS (SELECT 1 FROM cab_audience_rule_post _cab_rp WHERE _cab_rp.rule_id = _cab_r.id)
             OR EXISTS (
-              SELECT 1 FROM cab_audience_rule_post rp
-              WHERE rp.rule_id = r.id AND rp.post_id = ${worker.postId}
+              SELECT 1 FROM cab_audience_rule_post _cab_rp
+              WHERE _cab_rp.rule_id = _cab_r.id AND _cab_rp.post_id = ${worker.postId}
             )
           )
           AND (
-            NOT EXISTS (SELECT 1 FROM cab_audience_rule_department rd WHERE rd.rule_id = r.id)
+            NOT EXISTS (SELECT 1 FROM cab_audience_rule_department _cab_rd WHERE _cab_rd.rule_id = _cab_r.id)
             OR EXISTS (
-              SELECT 1 FROM cab_audience_rule_department rd
-              WHERE rd.rule_id = r.id AND rd.department_id = ${worker.departmentId}
+              SELECT 1 FROM cab_audience_rule_department _cab_rd
+              WHERE _cab_rd.rule_id = _cab_r.id AND _cab_rd.department_id = ${worker.departmentId}
             )
           )
       )
