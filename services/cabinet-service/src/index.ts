@@ -26,6 +26,18 @@ import {
   unpublishNews,
   upsertNews,
 } from "./admin.js";
+import {
+  getBenefitStats,
+  listBenefitsAdmin,
+  listKbAdmin,
+  publishBenefit,
+  publishKb,
+  sendNewsPush,
+  uploadBenefitCodes,
+  upsertBenefit,
+  upsertKbArticle,
+  upsertKbSection,
+} from "./admin-content.js";
 import { getConfig } from "./config.js";
 import { getCRMReader, verifyCRMOnStartup } from "./crm/index.js";
 import { BenefitNotAvailable, PoolExhausted, claimBenefit } from "./benefits.js";
@@ -559,6 +571,143 @@ export async function buildApp() {
   app.get("/admin/audit", async (req, reply) => {
     if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
     return { items: await listAudit(100) };
+  });
+
+  // ── Админ: бонусы ──────────────────────────────────────────────────────
+
+  app.get("/admin/benefits", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return { items: await listBenefitsAdmin() };
+  });
+
+  app.post("/admin/benefits", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as {
+      id?: number;
+      title?: string;
+      descriptionMd?: string;
+      kind?: string;
+      audienceId?: number | null;
+      sharedCode?: string | null;
+    };
+    if (!body.title?.trim()) return problem(reply, 400, "no_title", "не указано название");
+    return upsertBenefit(
+      {
+        id: body.id,
+        title: body.title.trim(),
+        descriptionMd: body.descriptionMd ?? "",
+        kind: body.kind === "personal" ? "personal" : "shared",
+        audienceId: body.audienceId ?? null,
+        sharedCode: body.sharedCode?.trim() || null,
+      },
+      who,
+    );
+  });
+
+  app.post("/admin/benefits/:id/codes", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as { codes?: string };
+    if (!body.codes?.trim()) return problem(reply, 400, "no_codes", "список кодов пуст");
+    return uploadBenefitCodes(Number((req.params as { id: string }).id), body.codes, who);
+  });
+
+  app.get("/admin/benefits/:id/stats", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return getBenefitStats(Number((req.params as { id: string }).id));
+  });
+
+  app.post("/admin/benefits/:id/publish", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as { publish?: boolean };
+    const result = await publishBenefit(
+      Number((req.params as { id: string }).id),
+      body.publish !== false,
+      who,
+    );
+    if (!result.ok) return problem(reply, 409, "publish_failed", result.reason ?? "не удалось");
+    return { status: "ok" };
+  });
+
+  // ── Админ: база знаний ─────────────────────────────────────────────────
+
+  app.get("/admin/kb", async (req, reply) => {
+    if (!adminEmail(req)) return problem(reply, 401, "unauthorized", "нужен service secret");
+    return listKbAdmin();
+  });
+
+  app.post("/admin/kb/sections", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as {
+      id?: number;
+      title?: string;
+      parentId?: number | null;
+      sort?: number;
+      audienceId?: number | null;
+    };
+    if (!body.title?.trim()) return problem(reply, 400, "no_title", "не указано название");
+    return upsertKbSection(
+      {
+        id: body.id,
+        title: body.title.trim(),
+        parentId: body.parentId ?? null,
+        sort: Number(body.sort) || 0,
+        audienceId: body.audienceId ?? null,
+      },
+      who,
+    );
+  });
+
+  app.post("/admin/kb/articles", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const body = (req.body ?? {}) as {
+      id?: number;
+      sectionId?: number | null;
+      title?: string;
+      bodyMd?: string;
+      audienceId?: number | null;
+    };
+    if (!body.title?.trim()) return problem(reply, 400, "no_title", "не указан заголовок");
+    return upsertKbArticle(
+      {
+        id: body.id,
+        sectionId: body.sectionId ?? null,
+        title: body.title.trim(),
+        bodyMd: body.bodyMd ?? "",
+        audienceId: body.audienceId ?? null,
+      },
+      who,
+    );
+  });
+
+  app.post("/admin/kb/:kind/:id/publish", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const params = req.params as { kind: string; id: string };
+    if (params.kind !== "sections" && params.kind !== "articles") {
+      return problem(reply, 400, "bad_kind", "ожидается sections или articles");
+    }
+    const body = (req.body ?? {}) as { publish?: boolean };
+    const result = await publishKb(
+      params.kind === "sections" ? "section" : "article",
+      Number(params.id),
+      body.publish !== false,
+      who,
+    );
+    if (!result.ok) return problem(reply, 409, "publish_failed", result.reason ?? "не удалось");
+    return { status: "ok" };
+  });
+
+  app.post("/admin/news/:id/push", async (req, reply) => {
+    const who = adminEmail(req);
+    if (!who) return problem(reply, 401, "unauthorized", "нужен service secret");
+    const result = await sendNewsPush(Number((req.params as { id: string }).id), who);
+    if (!result.ok) return problem(reply, 409, "push_failed", result.reason ?? "не удалось");
+    return { status: "ok", sent: result.sent };
   });
 
   return app;

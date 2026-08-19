@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { BenefitsTab, KbTab } from "./cabinet-content";
+
 type LinkRequest = {
   id: number;
   telegram_id: string;
@@ -25,7 +27,7 @@ type NewsRow = {
 
 type Audience = { id: number; name: string; is_everyone: boolean };
 
-type Tab = "requests" | "news" | "audiences";
+type Tab = "requests" | "news" | "kb" | "benefits" | "audiences";
 
 export function CabinetAdmin() {
   const [tab, setTab] = useState<Tab>("requests");
@@ -78,7 +80,7 @@ export function CabinetAdmin() {
       setNews(n?.items ?? []);
       setAudiences(a?.items ?? []);
     }
-    if (tab === "audiences") {
+    if (tab === "audiences" || tab === "kb" || tab === "benefits") {
       const data = (await call("audiences")) as { items: Audience[] } | null;
       setAudiences(data?.items ?? []);
     }
@@ -95,6 +97,8 @@ export function CabinetAdmin() {
           [
             { key: "requests", label: `Заявки${requests.length ? ` · ${requests.length}` : ""}` },
             { key: "news", label: "Новости" },
+            { key: "kb", label: "База знаний" },
+            { key: "benefits", label: "Бонусы" },
             { key: "audiences", label: "Аудитории" },
           ] as const
         ).map((item) => (
@@ -240,6 +244,20 @@ export function CabinetAdmin() {
                       >
                         {item.is_published ? "Снять" : "Опубликовать"}
                       </button>
+                      {item.is_published ? (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            const sent = await call(`news/${item.id}/push`, { method: "POST" });
+                            if (sent) setMessage("Уведомление отправлено");
+                          }}
+                          title="Отправить пуш со ссылкой на эту новость"
+                          className="ml-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                        >
+                          Пуш
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 ))}
@@ -247,6 +265,12 @@ export function CabinetAdmin() {
             </table>
           </div>
         </div>
+      ) : null}
+
+      {tab === "kb" ? <KbTab call={call} audiences={audiences} busy={busy} /> : null}
+
+      {tab === "benefits" ? (
+        <BenefitsTab call={call} audiences={audiences} busy={busy} />
       ) : null}
 
       {tab === "audiences" ? (
