@@ -1,3 +1,4 @@
+import { averageMinutes, medianMinutes } from "@/lib/appeal-statistics";
 import { resolveDeliveryPointFromText } from "@/lib/delivery-point-resolver";
 import { isCourierExcludedPointName } from "@/lib/delivery-points-catalog";
 import { getDeliveryPoint } from "@/lib/points";
@@ -124,6 +125,7 @@ export type Appeal = {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  deletedAt: string | null;
   courierLastReadAt: string | null;
   operatorLastReadAt: string | null;
   unreadCount: number;
@@ -184,6 +186,16 @@ export type AppealsTableMetric = {
 
 export type AppealSourceFilter = "max" | "telegram";
 
+/** Источник курьерских обращений — единственный канал экрана «Обращения». */
+export const COURIER_APPEAL_SOURCE = "max";
+
+/** Какой срез списка обращений показывать: рабочий или корзину. */
+export type AppealsListView = "active" | "trash";
+
+export function normalizeAppealsListView(value?: string | null): AppealsListView {
+  return value === "trash" ? "trash" : "active";
+}
+
 export type AppealsAnalyticsRange = {
   from?: string | null;
   to?: string | null;
@@ -202,13 +214,19 @@ export type AppealsAnalyticsReport = {
   qualityRows: AppealsTableMetric[];
 };
 
-export type AppealsStatisticsChannel = "it" | "courier";
-
 export type AppealsStatisticsSummary = {
   total: number;
   open: number;
   inProgress: number;
   closed: number;
+  /** Доля закрытых обращений, 0..1. */
+  closedShare: number | null;
+  /** Медиана времени до взятия в работу, минуты. */
+  medianResponseMinutes: number | null;
+  /** Медиана времени от взятия в работу до закрытия, минуты. */
+  medianResolveMinutes: number | null;
+  /** Медиана полного времени жизни обращения, минуты. */
+  medianTotalMinutes: number | null;
   avgResponseMinutes: number | null;
   avgResolveMinutes: number | null;
   avgTotalMinutes: number | null;
@@ -243,7 +261,6 @@ export type AppealsStatisticsAppealRow = {
 };
 
 export type AppealsStatistics = {
-  channel: AppealsStatisticsChannel;
   from: string;
   to: string;
   summary: AppealsStatisticsSummary;
@@ -251,6 +268,7 @@ export type AppealsStatistics = {
   byPoint: AppealsStatisticsBreakdownRow[];
   byInitiator: AppealsStatisticsBreakdownRow[];
   byCategory: AppealsStatisticsBreakdownRow[];
+  byResolution: AppealsStatisticsBreakdownRow[];
   appeals: AppealsStatisticsAppealRow[];
 };
 
@@ -432,6 +450,7 @@ async function migrateAppealsSchema() {
     ["contractor", "text"],
     ["it_comment", "text"],
     ["telegram_thread_id", "text"],
+    ["deleted_at", "timestamptz"],
   ]);
   await addColumns("employees", [
     ["display_name", "text"],
@@ -898,6 +917,7 @@ export async function listMergeCandidates(primaryId: string): Promise<MergeCandi
     FROM support_appeals a
     WHERE a.id <> ${primaryId}
       AND a.merged_into_id IS NULL
+      AND a.deleted_at IS NULL
       AND NOT EXISTS (
         SELECT 1
         FROM support_appeals child
@@ -1291,6 +1311,7 @@ async function getCourierAppealById(maxUserId: string, appealId: string, phone?:
     FROM support_appeals a
     LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.id = ${appealId}
+      AND a.deleted_at IS NULL
       AND (
         a.max_user_id = ${maxUserId}
         OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone})
@@ -1671,18 +1692,28 @@ export async function listCourierAppealsForBot(
     WHERE (a.max_user_id = ${maxUserId}
        OR (${normalizedPhone}::text IS NOT NULL AND a.phone = ${normalizedPhone}))
       AND a.merged_into_id IS NULL
+      AND a.deleted_at IS NULL
     ORDER BY a.created_at DESC
     LIMIT ${limit}
   `;
   return rows.map(toAppeal);
 }
 
-export async function listAppeals(status?: string, source?: string): Promise<Appeal[]> {
+/**
+ * Список обращений для дашборда.
+ *
+ * Показываются только курьерские обращения (`source = 'max'`). Операторский
+ * канал (телефон, визит, чаты IT) живёт на экране «Отчёт IT» и сюда не попадает.
+ */
+export async function listAppeals(
+  status?: string,
+  options?: { view?: AppealsListView },
+): Promise<Appeal[]> {
   await ensureAppealsSchema();
   await syncCourierProfilesFromAppeals();
   await autoAssignAppealClassifications();
   const statusFilter = status && status !== "all" ? status : null;
-  const sourceFilter = normalizeAnalyticsSource(source);
+  const deletedOnly = options?.view === "trash";
   const rows = await sql()`
     SELECT a.*, ap.name AS appeal_point_name,
       (
@@ -1701,9 +1732,13 @@ export async function listAppeals(status?: string, source?: string): Promise<App
     FROM support_appeals a
     LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.merged_into_id IS NULL
+      AND a.source = ${COURIER_APPEAL_SOURCE}
+      AND (
+        (${deletedOnly} AND a.deleted_at IS NOT NULL)
+        OR (NOT ${deletedOnly} AND a.deleted_at IS NULL)
+      )
       AND (${statusFilter}::text IS NULL OR a.status = ${statusFilter})
-      AND (${sourceFilter}::text IS NULL OR a.source = ${sourceFilter})
-    ORDER BY a.created_at DESC
+    ORDER BY COALESCE(a.deleted_at, a.created_at) DESC
     LIMIT 200
   `;
   const appeals = rows.map(toAppeal);
@@ -1711,6 +1746,37 @@ export async function listAppeals(status?: string, source?: string): Promise<App
   await attachMergedAppeals(appeals);
   attachUnreadCounts(appeals, "operator");
   return filterAdminInitiatorAppeals(appeals, await loadAdminEmployeeRows());
+}
+
+/**
+ * Мягкое удаление обращения: строка остаётся в БД, но исчезает из списков,
+ * отчётов и статистики. Вместе с обращением скрываются его смерженные дочерние.
+ */
+export async function deleteAppeal(id: string): Promise<Appeal | null> {
+  await ensureAppealsSchema();
+  const rows = await sql()`
+    UPDATE support_appeals
+    SET deleted_at = now(), updated_at = now()
+    WHERE (id = ${id} OR merged_into_id = ${id})
+      AND deleted_at IS NULL
+    RETURNING id
+  `;
+  if (rows.length === 0) return null;
+  return getAppeal(id);
+}
+
+/** Восстановление обращения из корзины. */
+export async function restoreAppeal(id: string): Promise<Appeal | null> {
+  await ensureAppealsSchema();
+  const rows = await sql()`
+    UPDATE support_appeals
+    SET deleted_at = NULL, updated_at = now()
+    WHERE (id = ${id} OR merged_into_id = ${id})
+      AND deleted_at IS NOT NULL
+    RETURNING id
+  `;
+  if (rows.length === 0) return null;
+  return getAppeal(id);
 }
 
 function extractIncidentText(issueText: string): string {
@@ -1792,6 +1858,7 @@ export async function listAppealsReport(range?: {
     FROM support_appeals a
     LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.merged_into_id IS NULL
+      AND a.deleted_at IS NULL
       AND (
         (${channel} = 'it' AND a.source <> 'max')
         OR (${channel} = 'courier' AND a.source = 'max')
@@ -1956,6 +2023,7 @@ async function attachMergedAppeals(appeals: Appeal[]) {
     FROM support_appeals a
     LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.merged_into_id = ANY(${ids})
+      AND a.deleted_at IS NULL
     ORDER BY a.created_at ASC
   `;
 
@@ -1998,6 +2066,7 @@ export async function closeAppeal(
   id: string,
   resultText: string,
   category?: SupportCategory,
+  resolutionMethod?: AppealResolutionMethod | null,
 ) {
   await ensureAppealsSchema();
   const inferred = category ?? inferCategoryFromResolution(resultText) ?? undefined;
@@ -2006,13 +2075,17 @@ export async function closeAppeal(
   }
 
   const before = await getAppeal(id);
+  const nextResolutionMethod =
+    resolutionMethod !== undefined ? resolutionMethod : (before?.resolutionMethod ?? null);
   const rows = await sql()`
     UPDATE support_appeals
     SET status = 'closed',
         result_text = ${resultText},
+        resolution_method = ${nextResolutionMethod},
         closed_at = now(),
         updated_at = now()
     WHERE id = ${id}
+      AND deleted_at IS NULL
     RETURNING *
   `;
   const appeal = rows[0] ? toAppeal(rows[0]) : null;
@@ -2224,6 +2297,7 @@ export async function readAppealAnalytics(range?: AppealsAnalyticsRange): Promis
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND deleted_at IS NULL
       AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY date_trunc('week', created_at)
     ORDER BY date_trunc('week', created_at)
@@ -2249,6 +2323,7 @@ export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange):
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND deleted_at IS NULL
       AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     ORDER BY week_start
   `;
@@ -2262,6 +2337,7 @@ export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange):
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND deleted_at IS NULL
       AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY row_label, date_trunc('week', created_at)
   `;
@@ -2274,6 +2350,7 @@ export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange):
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND deleted_at IS NULL
       AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY row_label, date_trunc('week', created_at)
     ORDER BY count(*) DESC
@@ -2290,6 +2367,7 @@ export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange):
     FROM support_appeals
     WHERE created_at::date >= ${from}::date
       AND created_at::date <= ${to}::date
+      AND deleted_at IS NULL
       AND (${sourceFilter}::text IS NULL OR source = ${sourceFilter})
     GROUP BY date_trunc('week', created_at)
   `;
@@ -2306,24 +2384,21 @@ export async function readAppealsAnalyticsReport(range?: AppealsAnalyticsRange):
   };
 }
 
+/** Статистика по курьерским обращениям за период. */
 export async function readAppealsStatistics(input: {
   from?: string | null;
   to?: string | null;
-  channel: AppealsStatisticsChannel;
 }): Promise<AppealsStatistics> {
   await ensureAppealsSchema();
   const { from, to } = resolveAnalyticsDateRange({ from: input.from, to: input.to });
-  const channel = input.channel;
 
   const rows = await sql()`
     SELECT a.*, ap.name AS appeal_point_name
     FROM support_appeals a
     LEFT JOIN delivery_points ap ON ap.id = a.point_id
     WHERE a.merged_into_id IS NULL
-      AND (
-        (${channel} = 'it' AND a.source <> 'max')
-        OR (${channel} = 'courier' AND a.source = 'max')
-      )
+      AND a.deleted_at IS NULL
+      AND a.source = ${COURIER_APPEAL_SOURCE}
       AND (a.created_at AT TIME ZONE ${APP_TIMEZONE})::date >= ${from}::date
       AND (a.created_at AT TIME ZONE ${APP_TIMEZONE})::date <= ${to}::date
     ORDER BY a.created_at ASC
@@ -2349,6 +2424,15 @@ export async function readAppealsStatistics(input: {
     return { key, label };
   });
   const byCategory = buildAppealsStatisticsBreakdown(appeals, getAppealCategoryDisplay, 20);
+  const byResolution = buildAppealsStatisticsBreakdown(
+    appeals.filter((appeal) => appeal.status === "closed"),
+    (appeal) => ({
+      key: appeal.resolutionMethod ?? "unknown",
+      label: appeal.resolutionMethod
+        ? getResolutionMethodLabel(appeal.resolutionMethod)
+        : "Не указан",
+    }),
+  );
 
   const appealRows: AppealsStatisticsAppealRow[] = appeals.map((appeal) => ({
     id: appeal.id,
@@ -2361,7 +2445,6 @@ export async function readAppealsStatistics(input: {
   }));
 
   return {
-    channel,
     from,
     to,
     summary,
@@ -2369,6 +2452,7 @@ export async function readAppealsStatistics(input: {
     byPoint,
     byInitiator,
     byCategory,
+    byResolution,
     appeals: appealRows,
   };
 }
@@ -2388,17 +2472,18 @@ function buildAppealsStatisticsSummary(appeals: Appeal[]): AppealsStatisticsSumm
     .map((appeal) => durationSeconds(appeal.createdAt, appeal.closedAt))
     .filter((value): value is number => value != null);
 
-  const average = (values: number[]) =>
-    values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length / 60 : null;
-
   return {
     total: appeals.length,
     open,
     inProgress,
     closed,
-    avgResponseMinutes: average(responseMinutes),
-    avgResolveMinutes: average(resolveMinutes),
-    avgTotalMinutes: average(totalMinutes),
+    closedShare: appeals.length > 0 ? closed / appeals.length : null,
+    medianResponseMinutes: medianMinutes(responseMinutes),
+    medianResolveMinutes: medianMinutes(resolveMinutes),
+    medianTotalMinutes: medianMinutes(totalMinutes),
+    avgResponseMinutes: averageMinutes(responseMinutes),
+    avgResolveMinutes: averageMinutes(resolveMinutes),
+    avgTotalMinutes: averageMinutes(totalMinutes),
   };
 }
 
@@ -2535,7 +2620,23 @@ export async function handleSupportGroupMessage(
   );
 }
 
+/**
+ * Приём сообщений из операторских Telegram-чатов.
+ *
+ * Операторский канал больше не заводит обращения автоматически: экран
+ * «Обращения» показывает только курьеров (MAX), а заявки операторов и
+ * менеджеров доставки вносятся вручную на экране «Отчёт IT».
+ * Вебхук продолжает отвечать 200 и писать лог, чтобы Telegram не копил ретраи.
+ */
 export async function handleTelegramSupportMessage(
+  input: SupportMessageInput,
+): Promise<SupportMessageResult> {
+  void input;
+  return { action: "skipped", reply: null };
+}
+
+/** @deprecated Оставлено на случай возврата операторского канала. */
+export async function handleTelegramSupportMessageLegacy(
   input: SupportMessageInput,
 ): Promise<SupportMessageResult> {
   await ensureAppealsSchema();
@@ -3286,6 +3387,7 @@ async function findRecentAppealByUser(userId: string, hours = APPEAL_DEDUP_HOURS
     FROM support_appeals
     WHERE max_user_id = ${userId}
       AND merged_into_id IS NULL
+      AND deleted_at IS NULL
       AND created_at >= now() - interval '1 hour'
     ORDER BY created_at DESC
     LIMIT 1
@@ -3522,6 +3624,7 @@ export async function reconcileCourierAppealData(): Promise<{
       SET point_id = NULL, updated_at = now()
       WHERE source = 'max'
         AND merged_into_id IS NULL
+        AND deleted_at IS NULL
         AND point_id = ANY(${excludedIds}::uuid[])
       RETURNING id
     `;
@@ -3534,6 +3637,7 @@ export async function reconcileCourierAppealData(): Promise<{
     FROM support_appeals a
     LEFT JOIN employees e ON e.max_user_id = a.max_user_id
     WHERE a.merged_into_id IS NULL
+      AND a.deleted_at IS NULL
       AND a.source = 'max'
       AND a.point_id IS NULL
     ORDER BY a.created_at DESC
@@ -3563,7 +3667,7 @@ export async function reconcileCourierAppealData(): Promise<{
 
   const allMax = await sql()`
     SELECT max_user_id, source FROM support_appeals
-    WHERE source = 'max' AND merged_into_id IS NULL
+    WHERE source = 'max' AND merged_into_id IS NULL AND deleted_at IS NULL
   `;
   const adminMaxAppeals = allMax.filter((row) =>
     appealInitiatorIsAdmin(
@@ -3812,6 +3916,7 @@ function toAppeal(row: postgres.Row): Appeal {
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
     closedAt: row.closed_at ? new Date(row.closed_at as string).toISOString() : null,
+    deletedAt: row.deleted_at ? new Date(row.deleted_at as string).toISOString() : null,
     courierLastReadAt: row.courier_last_read_at
       ? new Date(row.courier_last_read_at as string).toISOString()
       : null,

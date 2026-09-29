@@ -1,4 +1,5 @@
 import { auth } from "@/auth";
+import { APPEAL_RESOLUTION_METHODS, type AppealResolutionMethod } from "@/lib/appeal-intake-sources";
 import { closeAppeal } from "@/lib/appeals";
 import { SUPPORT_CATEGORY_CATALOG, type SupportCategory } from "@/lib/support-classifier";
 
@@ -16,6 +17,7 @@ export async function POST(
   const body = (await request.json().catch(() => ({}))) as {
     resultText?: string;
     category?: string;
+    resolutionMethod?: string | null;
   };
   const { id } = await params;
   const resultText = body.resultText?.trim();
@@ -32,7 +34,18 @@ export async function POST(
     category = key as SupportCategory;
   }
 
-  const appeal = await closeAppeal(id, resultText, category);
+  let resolutionMethod: AppealResolutionMethod | null | undefined;
+  if (body.resolutionMethod === null || body.resolutionMethod === "") {
+    resolutionMethod = null;
+  } else if (body.resolutionMethod) {
+    const method = body.resolutionMethod.trim();
+    if (!APPEAL_RESOLUTION_METHODS.some((item) => item.code === method)) {
+      return Response.json({ error: "Invalid resolutionMethod" }, { status: 400 });
+    }
+    resolutionMethod = method as AppealResolutionMethod;
+  }
+
+  const appeal = await closeAppeal(id, resultText, category, resolutionMethod);
 
   if (!appeal) {
     return Response.json({ error: "Not found" }, { status: 404 });

@@ -1,5 +1,5 @@
 import { auth } from "@/auth";
-import { updateAppealByOperator, type AppealStatus } from "@/lib/appeals";
+import { deleteAppeal, updateAppealByOperator, type AppealStatus } from "@/lib/appeals";
 
 export const runtime = "nodejs";
 
@@ -44,4 +44,21 @@ export async function PATCH(
       { status: 400 },
     );
   }
+}
+
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const session = await auth();
+  if (!session?.user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = await params;
+  const appeal = await deleteAppeal(id);
+  if (!appeal) {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
+  return Response.json({ appeal });
 }

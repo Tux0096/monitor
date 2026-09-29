@@ -1,44 +1,37 @@
 "use client";
 
-import type { AppealsStatistics, AppealsStatisticsAppealRow, AppealsStatisticsChannel } from "@/lib/appeals";
+import type { AppealsStatistics, AppealsStatisticsAppealRow } from "@/lib/appeals";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { WeeksPanel } from "./weeks-panel";
 import {
-  Area,
-  AreaChart,
+  APPEAL_STATUS_LABELS,
+  AXIS_TICK,
+  AXIS_TICK_CATEGORY,
+  BAR_RADIUS_HORIZONTAL,
+  BAR_RADIUS_VERTICAL,
+  CHART_SEGMENT_GAP,
+  ChartCard,
+  ChartTooltip,
+  foldCategorical,
+  formatMinutes,
+  formatPercent,
+  GRID_PROPS,
+  STATUS_COLORS,
+  STATUS_LABELS,
+} from "./chart-theme";
+import {
   Bar,
   BarChart,
   CartesianGrid,
   Cell,
   Legend,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-
-const STATUS_COLORS = {
-  open: "#a1a1aa",
-  inProgress: "#fbbf24",
-  closed: "#34d399",
-};
-
-const CATEGORY_COLORS = [
-  "#38bdf8",
-  "#a78bfa",
-  "#fbbf24",
-  "#34d399",
-  "#fb7185",
-  "#22d3ee",
-  "#f97316",
-  "#818cf8",
-  "#4ade80",
-  "#e879f9",
-];
 
 function toLocalDateInputValue(date: Date) {
   const year = date.getFullYear();
@@ -56,84 +49,84 @@ function defaultToDate() {
   return toLocalDateInputValue(new Date());
 }
 
-function formatMinutes(value: number | null | undefined) {
-  if (value == null) return "—";
-  if (value < 60) return `${Math.round(value)} мин`;
-  const hours = Math.floor(value / 60);
-  const minutes = Math.round(value % 60);
-  return minutes > 0 ? `${hours} ч ${minutes} мин` : `${hours} ч`;
-}
-
-function ChartTooltip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: Array<{ name?: string; value?: number; color?: string }>;
-  label?: string;
-}) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs shadow-xl">
-      {label ? <div className="mb-1 font-medium text-zinc-200">{label}</div> : null}
-      {payload.map((entry) => (
-        <div key={entry.name} className="flex items-center gap-2 text-zinc-300">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: entry.color }} />
-          <span>{entry.name}:</span>
-          <span className="font-medium text-white">{entry.value ?? 0}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-const APPEAL_STATUS_LABELS: Record<string, string> = {
-  open: "Открыто",
-  in_progress: "В работе",
-  closed: "Закрыто",
-};
-
 function formatAppealDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Стек «открытые / в работе / закрытые» — одинаковый во всех столбчатых графиках. */
+function StatusBars({ stackId, radius }: { stackId: string; radius?: [number, number, number, number] }) {
+  return (
+    <>
+      <Bar
+        dataKey="open"
+        name={STATUS_LABELS.open}
+        stackId={stackId}
+        fill={STATUS_COLORS.open}
+        {...CHART_SEGMENT_GAP}
+      />
+      <Bar
+        dataKey="inProgress"
+        name={STATUS_LABELS.inProgress}
+        stackId={stackId}
+        fill={STATUS_COLORS.inProgress}
+        {...CHART_SEGMENT_GAP}
+      />
+      <Bar
+        dataKey="closed"
+        name={STATUS_LABELS.closed}
+        stackId={stackId}
+        fill={STATUS_COLORS.closed}
+        radius={radius}
+        {...CHART_SEGMENT_GAP}
+      />
+    </>
+  );
 }
 
 function CategoryAppealsDrilldown({
   categories,
   appeals,
 }: {
-  categories: Array<{ key: string; name: string; value: number }>;
+  categories: Array<{ key: string; label: string }>;
   appeals: AppealsStatisticsAppealRow[];
 }) {
-  const [selectedKey, setSelectedKey] = useState<string>(categories[0]?.key ?? "");
+  const selectable = useMemo(
+    () => categories.filter((category) => category.key !== "__rest__"),
+    [categories],
+  );
+  const [selectedKey, setSelectedKey] = useState<string>(selectable[0]?.key ?? "");
 
-  useEffect(() => {
-    if (!categories.some((category) => category.key === selectedKey)) {
-      setSelectedKey(categories[0]?.key ?? "");
-    }
-  }, [categories, selectedKey]);
+  // Выбранная категория может исчезнуть при смене периода — тогда берём первую.
+  const activeKey = selectable.some((category) => category.key === selectedKey)
+    ? selectedKey
+    : (selectable[0]?.key ?? "");
 
   const filtered = useMemo(
-    () => appeals.filter((appeal) => appeal.categoryKey === selectedKey),
-    [appeals, selectedKey],
+    () => appeals.filter((appeal) => appeal.categoryKey === activeKey),
+    [appeals, activeKey],
   );
 
-  if (categories.length === 0) return null;
+  if (selectable.length === 0) return null;
 
   return (
     <div className="mt-4">
       <label className="text-xs text-zinc-500">
         Кто обращался
         <select
-          value={selectedKey}
+          value={activeKey}
           onChange={(e) => setSelectedKey(e.target.value)}
           className="mt-1 block w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
         >
-          {categories.map((category) => (
+          {selectable.map((category) => (
             <option key={category.key} value={category.key}>
-              {category.name} ({category.value})
+              {category.label}
             </option>
           ))}
         </select>
@@ -153,7 +146,9 @@ function CategoryAppealsDrilldown({
                     №{appeal.appealNumber} · {appeal.initiator}
                     {appeal.pointName ? ` · ${appeal.pointName}` : ""}
                   </span>
-                  <span className="shrink-0 text-xs text-zinc-500">{formatAppealDate(appeal.createdAt)}</span>
+                  <span className="shrink-0 text-xs text-zinc-500">
+                    {formatAppealDate(appeal.createdAt)}
+                  </span>
                   <span className="shrink-0 rounded-full border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400">
                     {APPEAL_STATUS_LABELS[appeal.status] ?? appeal.status}
                   </span>
@@ -167,23 +162,46 @@ function CategoryAppealsDrilldown({
   );
 }
 
+/**
+ * Итоговые цифры периода.
+ *
+ * Время показываем медианой, а не средним: одно забытое на неделю обращение
+ * задирает среднее так, что метрика перестаёт описывать типичный случай.
+ */
 function SummaryCards({ summary }: { summary: AppealsStatistics["summary"] }) {
   const cards = [
     { label: "Всего обращений", value: String(summary.total), tone: "text-white" },
     { label: "Открытые", value: String(summary.open), tone: "text-zinc-300" },
     { label: "В работе", value: String(summary.inProgress), tone: "text-amber-300" },
     { label: "Закрытые", value: String(summary.closed), tone: "text-emerald-300" },
-    { label: "Среднее реагирование", value: formatMinutes(summary.avgResponseMinutes), tone: "text-sky-300" },
-    { label: "Среднее выполнение", value: formatMinutes(summary.avgResolveMinutes), tone: "text-violet-300" },
-    { label: "Среднее общее время", value: formatMinutes(summary.avgTotalMinutes), tone: "text-cyan-300" },
+    { label: "Доля закрытых", value: formatPercent(summary.closedShare), tone: "text-emerald-300" },
+    {
+      label: "Реакция, медиана",
+      value: formatMinutes(summary.medianResponseMinutes),
+      tone: "text-sky-300",
+      hint: `Среднее: ${formatMinutes(summary.avgResponseMinutes)}`,
+    },
+    {
+      label: "Решение, медиана",
+      value: formatMinutes(summary.medianResolveMinutes),
+      tone: "text-violet-300",
+      hint: `Среднее: ${formatMinutes(summary.avgResolveMinutes)}`,
+    },
+    {
+      label: "Полный цикл, медиана",
+      value: formatMinutes(summary.medianTotalMinutes),
+      tone: "text-cyan-300",
+      hint: `Среднее: ${formatMinutes(summary.avgTotalMinutes)}`,
+    },
   ];
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {cards.map((card) => (
         <div key={card.label} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
           <div className="text-xs uppercase tracking-wide text-zinc-500">{card.label}</div>
           <div className={`mt-2 text-2xl font-semibold ${card.tone}`}>{card.value}</div>
+          {card.hint ? <div className="mt-1 text-[11px] text-zinc-600">{card.hint}</div> : null}
         </div>
       ))}
     </div>
@@ -191,21 +209,8 @@ function SummaryCards({ summary }: { summary: AppealsStatistics["summary"] }) {
 }
 
 function StatisticsPanel({ stats }: { stats: AppealsStatistics }) {
-  const statusData = useMemo(
-    () => [
-      { name: "Открытые", value: stats.summary.open, key: "open" },
-      { name: "В работе", value: stats.summary.inProgress, key: "inProgress" },
-      { name: "Закрытые", value: stats.summary.closed, key: "closed" },
-    ],
-    [stats.summary],
-  );
-
   const timelineData = useMemo(
-    () =>
-      stats.timeline.map((row) => ({
-        ...row,
-        name: row.label,
-      })),
+    () => stats.timeline.map((row) => ({ ...row, name: row.label })),
     [stats.timeline],
   );
 
@@ -219,199 +224,120 @@ function StatisticsPanel({ stats }: { stats: AppealsStatistics }) {
     [stats.byInitiator],
   );
 
-  const dailyCountData = useMemo(
-    () =>
-      stats.timeline.map((row) => ({
-        name: row.label,
-        total: row.total,
-      })),
-    [stats.timeline],
-  );
+  const categorySlices = useMemo(() => foldCategorical(stats.byCategory), [stats.byCategory]);
 
   const categoryData = useMemo(
-    () =>
-      stats.byCategory.map((row) => ({
-        name: row.label,
-        value: row.total,
-        key: row.key,
-      })),
-    [stats.byCategory],
+    () => categorySlices.map((slice) => ({ ...slice, name: slice.label, total: slice.value })),
+    [categorySlices],
   );
+
+  const resolutionData = useMemo(
+    () => stats.byResolution.map((row) => ({ ...row, name: row.label })),
+    [stats.byResolution],
+  );
+
+  const timelineHasData = timelineData.some((row) => row.total > 0);
 
   return (
     <div className="space-y-6">
       <SummaryCards summary={stats.summary} />
 
-      <div className="grid gap-6 xl:grid-cols-2">
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-medium text-white">Обращений в день</h2>
-          <p className="mt-1 text-xs text-zinc-500">Количество новых обращений по датам</p>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={dailyCountData}>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
-                <XAxis dataKey="name" tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                <YAxis allowDecimals={false} tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                <Tooltip content={<ChartTooltip />} />
-                <Bar dataKey="total" name="Обращений" fill="#38bdf8" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
+      <ChartCard
+        title="Обращения по дням"
+        hint="Новые обращения по датам, в разрезе текущего статуса"
+        isEmpty={!timelineHasData}
+        height="h-80"
+      >
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={timelineData}>
+            <CartesianGrid {...GRID_PROPS} />
+            <XAxis dataKey="name" tick={AXIS_TICK} />
+            <YAxis allowDecimals={false} tick={AXIS_TICK} />
+            <Tooltip content={<ChartTooltip />} cursor={{ fill: "#18181b" }} />
+            <Legend />
+            <StatusBars stackId="day" radius={BAR_RADIUS_VERTICAL} />
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartCard>
 
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-medium text-white">По типу обращения</h2>
-          <p className="mt-1 text-xs text-zinc-500">
-            Данные из БД support_appeals: без админов и без офисных точек (Колл центр)
-          </p>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart key={categoryData.map((row) => `${row.name}:${row.value}`).join("|")}>
-                <Pie
-                  data={categoryData}
-                  dataKey="value"
-                  nameKey="name"
-                  innerRadius={50}
-                  outerRadius={95}
-                  paddingAngle={2}
-                >
-                  {categoryData.map((entry, index) => (
-                    <Cell
-                      key={entry.key}
-                      fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]}
-                    />
-                  ))}
-                </Pie>
-                <Tooltip content={<ChartTooltip />} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <CategoryAppealsDrilldown categories={categoryData} appeals={stats.appeals} />
-        </section>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <ChartCard
+          title="По типу обращения"
+          hint="Без админов и офисных точек. Длинный хвост свёрнут в «Прочее»"
+          isEmpty={categoryData.length === 0}
+          height="h-80"
+          footer={<CategoryAppealsDrilldown categories={categorySlices} appeals={stats.appeals} />}
+        >
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={categoryData} layout="vertical" margin={{ left: 12, right: 24 }}>
+              <CartesianGrid {...GRID_PROPS} />
+              <XAxis type="number" allowDecimals={false} tick={AXIS_TICK} />
+              <YAxis type="category" dataKey="name" width={150} tick={AXIS_TICK_CATEGORY} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: "#18181b" }} />
+              <Bar dataKey="total" name="Обращений" radius={BAR_RADIUS_HORIZONTAL}>
+                {categoryData.map((entry) => (
+                  <Cell key={entry.key} fill={entry.color} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        <ChartCard
+          title="Как решали"
+          hint="Закрытые обращения по способу решения"
+          isEmpty={resolutionData.length === 0}
+          emptyText="За период нет закрытых обращений."
+          height="h-80"
+        >
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={resolutionData} layout="vertical" margin={{ left: 12, right: 24 }}>
+              <CartesianGrid {...GRID_PROPS} />
+              <XAxis type="number" allowDecimals={false} tick={AXIS_TICK} />
+              <YAxis type="category" dataKey="name" width={120} tick={AXIS_TICK_CATEGORY} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: "#18181b" }} />
+              <Bar
+                dataKey="total"
+                name="Закрыто"
+                fill={STATUS_COLORS.closed}
+                radius={BAR_RADIUS_HORIZONTAL}
+              />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-medium text-white">Статусы обращений</h2>
-          <p className="mt-1 text-xs text-zinc-500">Клик по легенде скрывает сегмент</p>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={statusData}
-                  dataKey="value"
-                  nameKey="name"
-                  innerRadius={55}
-                  outerRadius={95}
-                  paddingAngle={2}
-                >
-                  {statusData.map((entry) => (
-                    <Cell
-                      key={entry.key}
-                      fill={STATUS_COLORS[entry.key as keyof typeof STATUS_COLORS]}
-                    />
-                  ))}
-                </Pie>
-                <Tooltip content={<ChartTooltip />} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
+        <ChartCard title="По точкам" hint="Топ точек за период" isEmpty={pointData.length === 0} height="h-80">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={pointData} layout="vertical" margin={{ left: 12, right: 12 }}>
+              <CartesianGrid {...GRID_PROPS} />
+              <XAxis type="number" allowDecimals={false} tick={AXIS_TICK} />
+              <YAxis type="category" dataKey="name" width={140} tick={AXIS_TICK_CATEGORY} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: "#18181b" }} />
+              <Legend />
+              <StatusBars stackId="point" radius={BAR_RADIUS_HORIZONTAL} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
 
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-medium text-white">Динамика по дням</h2>
-          <p className="mt-1 text-xs text-zinc-500">Наведите на точку для детализации</p>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timelineData}>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
-                <XAxis dataKey="name" tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                <YAxis allowDecimals={false} tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                <Tooltip content={<ChartTooltip />} />
-                <Legend />
-                <Area
-                  type="monotone"
-                  dataKey="open"
-                  name="Открытые"
-                  stackId="1"
-                  stroke={STATUS_COLORS.open}
-                  fill={STATUS_COLORS.open}
-                  fillOpacity={0.35}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="inProgress"
-                  name="В работе"
-                  stackId="1"
-                  stroke={STATUS_COLORS.inProgress}
-                  fill={STATUS_COLORS.inProgress}
-                  fillOpacity={0.35}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="closed"
-                  name="Закрытые"
-                  stackId="1"
-                  stroke={STATUS_COLORS.closed}
-                  fill={STATUS_COLORS.closed}
-                  fillOpacity={0.35}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-2">
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-medium text-white">По точкам</h2>
-          <p className="mt-1 text-xs text-zinc-500">Топ точек за период</p>
-          <div className="mt-4 h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={pointData} layout="vertical" margin={{ left: 12, right: 12 }}>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
-                <XAxis type="number" allowDecimals={false} tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                <YAxis
-                  type="category"
-                  dataKey="name"
-                  width={120}
-                  tick={{ fill: "#d4d4d8", fontSize: 11 }}
-                />
-                <Tooltip content={<ChartTooltip />} />
-                <Legend />
-                <Bar dataKey="open" name="Открытые" stackId="a" fill={STATUS_COLORS.open} />
-                <Bar dataKey="inProgress" name="В работе" stackId="a" fill={STATUS_COLORS.inProgress} />
-                <Bar dataKey="closed" name="Закрытые" stackId="a" fill={STATUS_COLORS.closed} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="text-sm font-medium text-white">По заявителям</h2>
-          <p className="mt-1 text-xs text-zinc-500">Топ инициаторов за период</p>
-          <div className="mt-4 h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={initiatorData} layout="vertical" margin={{ left: 12, right: 12 }}>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
-                <XAxis type="number" allowDecimals={false} tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                <YAxis
-                  type="category"
-                  dataKey="name"
-                  width={120}
-                  tick={{ fill: "#d4d4d8", fontSize: 11 }}
-                />
-                <Tooltip content={<ChartTooltip />} />
-                <Legend />
-                <Bar dataKey="open" name="Открытые" stackId="b" fill={STATUS_COLORS.open} />
-                <Bar dataKey="inProgress" name="В работе" stackId="b" fill={STATUS_COLORS.inProgress} />
-                <Bar dataKey="closed" name="Закрытые" stackId="b" fill={STATUS_COLORS.closed} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
+        <ChartCard
+          title="По заявителям"
+          hint="Топ курьеров за период"
+          isEmpty={initiatorData.length === 0}
+          height="h-80"
+        >
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={initiatorData} layout="vertical" margin={{ left: 12, right: 12 }}>
+              <CartesianGrid {...GRID_PROPS} />
+              <XAxis type="number" allowDecimals={false} tick={AXIS_TICK} />
+              <YAxis type="category" dataKey="name" width={140} tick={AXIS_TICK_CATEGORY} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: "#18181b" }} />
+              <Legend />
+              <StatusBars stackId="initiator" radius={BAR_RADIUS_HORIZONTAL} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
       </div>
     </div>
   );
@@ -421,7 +347,6 @@ type StatisticsView = "appeals" | "weeks";
 
 export function StatisticsClient({ isAdmin = false }: { isAdmin?: boolean }) {
   const [view, setView] = useState<StatisticsView>("appeals");
-  const [channel, setChannel] = useState<AppealsStatisticsChannel>("courier");
   const [fromDate, setFromDate] = useState(defaultFromDate);
   const [toDate, setToDate] = useState(defaultToDate);
   const [stats, setStats] = useState<AppealsStatistics | null>(null);
@@ -435,7 +360,6 @@ export function StatisticsClient({ isAdmin = false }: { isAdmin?: boolean }) {
       const params = new URLSearchParams({
         from: fromDate,
         to: toDate,
-        channel,
         _: String(Date.now()),
       });
       const response = await fetch(`/api/appeals/statistics?${params.toString()}`, {
@@ -450,7 +374,7 @@ export function StatisticsClient({ isAdmin = false }: { isAdmin?: boolean }) {
     } finally {
       setLoading(false);
     }
-  }, [channel, fromDate, toDate]);
+  }, [fromDate, toDate]);
 
   useEffect(() => {
     void loadStats();
@@ -460,12 +384,14 @@ export function StatisticsClient({ isAdmin = false }: { isAdmin?: boolean }) {
     function onFocus() {
       void loadStats();
     }
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", () => {
+    function onVisibilityChange() {
       if (document.visibilityState === "visible") onFocus();
-    });
+    }
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [loadStats]);
 
@@ -476,8 +402,8 @@ export function StatisticsClient({ isAdmin = false }: { isAdmin?: boolean }) {
           <p className="text-xs text-zinc-600">Мониторинг обращений</p>
           <h1 className="mt-2 text-2xl font-semibold text-white">Статистика</h1>
           <p className="mt-2 text-sm text-zinc-500">
-            Сводка по обращениям в поддержку и курьерскому приложению с интерактивными графиками.
-            Обращения из MAX — вкладка «Курьерское приложение».
+            Обращения курьеров из MAX: сколько приходит, как быстро берут в работу и чем
+            заканчивается.
           </p>
         </div>
         <button
@@ -518,69 +444,45 @@ export function StatisticsClient({ isAdmin = false }: { isAdmin?: boolean }) {
 
       {view === "appeals" ? (
         <>
-      <section className="mb-4 flex flex-wrap items-end gap-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-        <div className="flex rounded-xl border border-zinc-800 bg-zinc-900 p-1">
-          <button
-            type="button"
-            onClick={() => setChannel("it")}
-            className={
-              channel === "it"
-                ? "rounded-lg bg-sky-500/20 px-4 py-2 text-sm text-sky-100"
-                : "rounded-lg px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200"
-            }
-          >
-            Поддержка IT
-          </button>
-          <button
-            type="button"
-            onClick={() => setChannel("courier")}
-            className={
-              channel === "courier"
-                ? "rounded-lg bg-violet-500/20 px-4 py-2 text-sm text-violet-100"
-                : "rounded-lg px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200"
-            }
-          >
-            Курьерское приложение
-          </button>
-        </div>
-        <label className="text-sm text-zinc-400">
-          С
-          <input
-            type="date"
-            value={fromDate}
-            onChange={(e) => setFromDate(e.target.value)}
-            className="mt-1 block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
-          />
-        </label>
-        <label className="text-sm text-zinc-400">
-          По
-          <input
-            type="date"
-            value={toDate}
-            onChange={(e) => setToDate(e.target.value)}
-            className="mt-1 block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
-          />
-        </label>
-        {stats ? (
-          <div className="ml-auto text-sm text-zinc-500">
-            Период: {stats.from} — {stats.to}
-          </div>
-        ) : null}
-      </section>
+          <section className="mb-4 flex flex-wrap items-end gap-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+            <label className="text-sm text-zinc-400">
+              С
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="mt-1 block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+              />
+            </label>
+            <label className="text-sm text-zinc-400">
+              По
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="mt-1 block rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+              />
+            </label>
+            {stats ? (
+              <div className="ml-auto text-sm text-zinc-500">
+                Период: {stats.from} — {stats.to}
+              </div>
+            ) : null}
+          </section>
 
-      {error ? <p className="mb-4 text-sm text-rose-300">{error}</p> : null}
+          {error ? <p className="mb-4 text-sm text-rose-300">{error}</p> : null}
 
-      {loading ? (
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-8 text-sm text-zinc-500">
-          Загружаем статистику…
-        </div>
-      ) : stats && stats.summary.total === 0 ? (
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-8 text-sm text-zinc-500">
-          За выбранный период обращений нет.
-        </div>
-      ) : stats ? (
-        <StatisticsPanel stats={stats} />
-      ) : null}
+          {loading ? (
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-8 text-sm text-zinc-500">
+              Загружаем статистику…
+            </div>
+          ) : stats && stats.summary.total === 0 ? (
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-8 text-sm text-zinc-500">
+              За выбранный период обращений нет.
+            </div>
+          ) : stats ? (
+            <StatisticsPanel stats={stats} />
+          ) : null}
         </>
       ) : null}
     </main>
