@@ -1,5 +1,5 @@
 import { auth } from "@/auth";
-import { createManualAppeal, listAppeals } from "@/lib/appeals";
+import { createManualAppeal, listAppeals, normalizeAppealsListView } from "@/lib/appeals";
 
 export const runtime = "nodejs";
 
@@ -11,8 +11,8 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const status = url.searchParams.get("status") ?? undefined;
-  const source = url.searchParams.get("source") ?? undefined;
-  const appeals = await listAppeals(status, source);
+  const view = normalizeAppealsListView(url.searchParams.get("view"));
+  const appeals = await listAppeals(status, { view });
   return Response.json({ appeals });
 }
 
