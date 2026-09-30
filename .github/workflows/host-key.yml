@@ -1,0 +1,77 @@
+name: Показать ключ хоста сервера
+
+# Вспомогательный workflow: снимает публичный ключ SSH-хоста и печатает его,
+# чтобы значение для секрета DEPLOY_KNOWN_HOSTS можно было получить из браузера,
+# не запуская ssh-keyscan на своей машине.
+#
+# Публичный ключ хоста — не секрет, печатать его в лог безопасно.
+# Секреты здесь не используются и приватный ключ не нужен.
+#
+# ВАЖНО про доверие: сам по себе первый скан ничего не подтверждает — он лишь
+# фиксирует то, что ответило по этому адресу сейчас (trust on first use).
+# Зато после записи в секрет все последующие деплои сверяются с ним, и подмена
+# сервера уже не пройдёт. Чтобы закрыть и первый шаг, сверьте отпечаток ниже
+# с выводом на самом сервере (через консоль хостинга):
+#   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: Хост сервера
+        required: true
+        default: it.franchise-fuji.ru
+      port:
+        description: Порт SSH
+        required: false
+        default: "22"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    if: github.repository == 'Tux0096/monitor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Снять ключ хоста
+        env:
+          HOST: ${{ inputs.host }}
+          PORT: ${{ inputs.port }}
+        run: |
+          set -euo pipefail
+          ssh-keyscan -H -p "${PORT}" "${HOST}" > keys.txt 2> scan.err || {
+            echo "::error::ssh-keyscan не смог получить ключ с ${HOST}:${PORT}"
+            cat scan.err
+            exit 1
+          }
+          if [ ! -s keys.txt ]; then
+            echo "::error::Ответ пустой — проверьте хост и порт. Диагностика ssh-keyscan:"
+            cat scan.err
+            exit 1
+          fi
+          echo "=== Отпечатки (сверьте с сервером) ==="
+          ssh-keygen -lf keys.txt
+
+      - name: Вывести значение для секрета
+        run: |
+          set -euo pipefail
+          {
+            echo "### Значение для секрета \`DEPLOY_KNOWN_HOSTS\`"
+            echo
+            echo "Скопируйте блок целиком в Settings → Secrets and variables → Actions:"
+            echo
+            echo '```'
+            cat keys.txt
+            echo '```'
+            echo
+            echo "### Отпечатки"
+            echo
+            echo "Сверьте их с выводом на сервере через консоль хостинга:"
+            echo '`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`'
+            echo
+            echo '```'
+            ssh-keygen -lf keys.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

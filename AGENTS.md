@@ -65,6 +65,9 @@
   `scripts/server-git-deploy.sh`. Можно запустить вручную кнопкой
   Run workflow. Секреты репозитория: `DEPLOY_HOST`, `DEPLOY_USER`,
   `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, необязательно `DEPLOY_PORT`.
+- Значение для `DEPLOY_KNOWN_HOSTS` получается без своей машины: workflow
+  `.github/workflows/host-key.yml` (Actions → «Показать ключ хоста сервера» →
+  Run workflow) печатает готовый блок и отпечатки в сводку запуска.
 - Вручную на сервере: `bash /opt/monitor/scripts/server-git-deploy.sh`.
 - `npm run deploy` — только **web** (standalone + pm2).
 - `npm run deploy:infra` — `docker compose` в `/opt/monitor` (postgres, auth).
