@@ -9,7 +9,7 @@ name: Deploy prod
 #
 # Нужные секреты репозитория (Settings → Secrets and variables → Actions):
 #   DEPLOY_HOST        — хост сервера, например it.franchise-fuji.ru
-#   DEPLOY_USER        — пользователь SSH, например root
+#   DEPLOY_USER        — пользователь SSH, например ubuntu (облачные образы не пускают root)
 #   DEPLOY_SSH_KEY     — приватный ключ целиком, включая строки BEGIN/END
 #   DEPLOY_KNOWN_HOSTS — вывод `ssh-keyscan -H <хост>`, выполненный с доверенной машины
 #   DEPLOY_PORT        — необязательно, по умолчанию 22
@@ -74,13 +74,22 @@ jobs:
         run: |
           set -euo pipefail
           # Ключ хоста сверяется по known_hosts: подменённый сервер не получит ключ.
+          #
+          # Скрипт запускается от того, кому принадлежит /opt/monitor. Облачные
+          # образы Ubuntu не пускают root по SSH, поэтому заходим обычным
+          # пользователем: если он может писать в /opt/monitor — запускаем от него,
+          # иначе через sudo. Иначе pm2 под чужим пользователем поднял бы второй
+          # демон, который стал бы драться с рабочим за порт.
+          # `sudo -n` не ждёт пароль: если он нужен, шаг падает сразу, а не виснет.
+          # Команда в одну строку и в POSIX-синтаксисе — её разбирает удалённый шелл.
           ssh -i ~/.ssh/deploy_key \
               -o BatchMode=yes \
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=20 \
               -p "${DEPLOY_PORT:-22}" \
               "${DEPLOY_USER}@${DEPLOY_HOST}" \
-              'bash /opt/monitor/scripts/server-git-deploy.sh' | tee deploy.log
+              'S=/opt/monitor/scripts/server-git-deploy.sh; echo "==> ssh user: $(id -un)"; if [ "$(id -u)" -eq 0 ] || [ -w /opt/monitor ]; then echo "==> running as $(id -un)"; bash "$S"; else echo "==> /opt/monitor is not writable by $(id -un), running via sudo"; sudo -n -i bash "$S"; fi' \
+              | tee deploy.log
 
       - name: Итог в сводку запуска
         if: always()
