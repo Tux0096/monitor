@@ -1,0 +1,105 @@
+name: Deploy prod
+
+# Деплой monitor-dashboard на it.franchise-fuji.ru.
+#
+# Запускается на каждый push в main и вручную (кнопка Run workflow).
+# Вся работа делается серверным скриптом scripts/server-git-deploy.sh:
+# он сам тянет main, ставит зависимости, собирает и перезапускает pm2.
+# Скрипт идемпотентный — если новых коммитов нет, печатает up_to_date и выходит.
+#
+# Нужные секреты репозитория (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST        — хост сервера, например it.franchise-fuji.ru
+#   DEPLOY_USER        — пользователь SSH, например root
+#   DEPLOY_SSH_KEY     — приватный ключ целиком, включая строки BEGIN/END
+#   DEPLOY_KNOWN_HOSTS — вывод `ssh-keyscan -H <хост>`, выполненный с доверенной машины
+#   DEPLOY_PORT        — необязательно, по умолчанию 22
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Два деплоя одновременно сломали бы сборку на сервере: ждём предыдущий.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Не запускаться в форках: там нет секретов, а лог был бы красным без причины.
+    if: github.repository == 'Tux0096/monitor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Проверить, что секреты заданы
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${DEPLOY_HOST}" ] || missing+=(DEPLOY_HOST)
+          [ -n "${DEPLOY_USER}" ] || missing+=(DEPLOY_USER)
+          [ -n "${DEPLOY_SSH_KEY}" ] || missing+=(DEPLOY_SSH_KEY)
+          [ -n "${DEPLOY_KNOWN_HOSTS}" ] || missing+=(DEPLOY_KNOWN_HOSTS)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Не заданы секреты: ${missing[*]}. Добавьте их в Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: Подготовить SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # printf, а не echo: сохраняет переводы строк PEM-ключа.
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Запустить деплой на сервере
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          set -euo pipefail
+          # Ключ хоста сверяется по known_hosts: подменённый сервер не получит ключ.
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 \
+              -p "${DEPLOY_PORT:-22}" \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              'bash /opt/monitor/scripts/server-git-deploy.sh' | tee deploy.log
+
+      - name: Итог в сводку запуска
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### Деплой prod"
+            echo
+            echo "Коммит: \`${GITHUB_SHA}\`"
+            echo
+            if [ -f deploy.log ]; then
+              echo '```'
+              tail -20 deploy.log
+              echo '```'
+            else
+              echo "Лог деплоя отсутствует — задание упало до подключения."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
