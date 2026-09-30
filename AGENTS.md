@@ -65,6 +65,10 @@
   `scripts/server-git-deploy.sh`. Можно запустить вручную кнопкой
   Run workflow. Секреты репозитория: `DEPLOY_HOST`, `DEPLOY_USER`,
   `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, необязательно `DEPLOY_PORT`.
+- `DEPLOY_USER` — `ubuntu`: образ сервера не пускает root по SSH (отвечает
+  «Please login as the user "ubuntu"» и выходит с кодом 142). Скрипт деплоя
+  запускается от владельца `/opt/monitor`: сам, если есть права на запись,
+  иначе через `sudo -n -i` — чтобы pm2 не поднял второй демон.
 - Значение для `DEPLOY_KNOWN_HOSTS` получается без своей машины: workflow
   `.github/workflows/host-key.yml` (Actions → «Показать ключ хоста сервера» →
   Run workflow) печатает готовый блок и отпечатки в сводку запуска.
