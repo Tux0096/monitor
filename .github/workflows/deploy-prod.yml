@@ -18,6 +18,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force:
+        description: Пересобрать, даже если сервер уже на этом коммите
+        type: boolean
+        default: false
 
 # Два деплоя одновременно сломали бы сборку на сервере: ждём предыдущий.
 concurrency:
@@ -71,8 +76,12 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          # На push входа нет — там всегда обычный деплой.
+          FORCE: ${{ inputs.force && '1' || '0' }}
         run: |
           set -euo pipefail
+          # FORCE подставляется в удалённую команду, поэтому пускаем только 0 или 1.
+          case "${FORCE}" in 0|1) ;; *) echo "::error::FORCE должен быть 0 или 1"; exit 1 ;; esac
           # Ключ хоста сверяется по known_hosts: подменённый сервер не получит ключ.
           #
           # Скрипт запускается от того, кому принадлежит /opt/monitor. Облачные
@@ -82,13 +91,19 @@ jobs:
           # демон, который стал бы драться с рабочим за порт.
           # `sudo -n` не ждёт пароль: если он нужен, шаг падает сразу, а не виснет.
           # Команда в одну строку и в POSIX-синтаксисе — её разбирает удалённый шелл.
+          # server-git-deploy.sh пропускает сборку, если коммит уже совпадает с main
+          # (печатает up_to_date); FORCE=1 заставляет пересобрать и перезапустить.
+          # `sudo -i` сбрасывает окружение, поэтому FORCE передаётся через env.
+          # Тот же lock-файл берёт серверный крон автодеплоя (flock -n): без него
+          # крон и этот workflow пересобирали бы /opt/monitor/src одновременно.
+          # Здесь ждём освобождения до 15 минут, крон же просто пропускает ход.
           ssh -i ~/.ssh/deploy_key \
               -o BatchMode=yes \
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=20 \
               -p "${DEPLOY_PORT:-22}" \
               "${DEPLOY_USER}@${DEPLOY_HOST}" \
-              'S=/opt/monitor/scripts/server-git-deploy.sh; echo "==> ssh user: $(id -un)"; if [ "$(id -u)" -eq 0 ] || [ -w /opt/monitor ]; then echo "==> running as $(id -un)"; bash "$S"; else echo "==> /opt/monitor is not writable by $(id -un), running via sudo"; sudo -n -i bash "$S"; fi' \
+              'export FORCE='"${FORCE}"'; S=/opt/monitor/scripts/server-git-deploy.sh; echo "==> ssh user: $(id -un), FORCE=$FORCE"; if [ "$(id -u)" -eq 0 ] || [ -w /opt/monitor ]; then echo "==> running as $(id -un)"; flock -w 900 /tmp/monitor-deploy.lock bash "$S"; else echo "==> /opt/monitor is not writable by $(id -un), running via sudo"; sudo -n -i env FORCE="$FORCE" flock -w 900 /tmp/monitor-deploy.lock bash "$S"; fi' \
               | tee deploy.log
 
       - name: Итог в сводку запуска
